@@ -24,6 +24,29 @@ ApplicationWindow {
 
     Component.onCompleted: journal.start()
 
+    // The app opens ready to type: today's empty block has the caret before the first keystroke.
+    Connections {
+        target: journal
+        function onReadyChanged() {
+            if (journal.ready) {
+                root.focusRow = root.firstBlockRow()
+                root.focusCursor = 0
+                root.wantsFocus = true
+                Qt.callLater(root.focusBlock, root.focusRow)
+            }
+        }
+    }
+
+    function firstBlockRow() {
+        for (let i = 0; i < list.count; i++) {
+            const item = list.itemAtIndex(i)
+            if (item && item.isBlock) {
+                return i
+            }
+        }
+        return 1
+    }
+
     Shortcut {
         sequences: ["Ctrl+Z"]
         onActivated: journal.undo()
@@ -165,7 +188,9 @@ ApplicationWindow {
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
-                            root.focusRow = index
+                            // The new block is the next row; the caret follows it.
+                            root.focusRow = index + 1
+                            root.focusCursor = 0
                             root.wantsFocus = true
                             journal.submit_block(index, cursorPosition, text)
                             event.accepted = true
