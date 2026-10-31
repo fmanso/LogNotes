@@ -1,0 +1,11 @@
+[package]
+name = "lognotes-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The note model, store, and queries behind LogNotes: no Qt, no UI."
+
+[dependencies]
+chrono = "0.4"
+rusqlite = { version = "0.41", features = ["bundled"] }
+thiserror = "2"

@@ -91,15 +91,22 @@ ever visible.
 | Command | Effect |
 | --- | --- |
 | `create_page(name)` | Creates a page, or returns the existing one whose `name_key` matches. |
-| `journal_page(date)` | Finds or creates the journal page for that date. |
+| `journal_page(date)` | **Lookup only**: the journal page for that date, or none. Reading never writes — that is what lets the column scroll past a year of empty days without creating them. |
+| `ensure_journal_page(date)` | Finds or creates the journal page for that date. Called only when something is actually written to the day. |
 | `insert_block(page, after, content)` | New block as the next sibling of `after` (or last child), with a key between its neighbours. |
 | `update_content(block, content)` | Re-extracts links and reindexes text. |
+| `split_block(block, offset)` | One command for Enter mid-block: keeps the text before `offset`, moves the rest into a new sibling. Splitting and inserting separately would show up as two undo steps. |
 | `set_marker(block, marker)` | Sets or clears the task marker; cycling order is a view concern. |
 | `set_scheduled(block, date)` | Sets or clears the scheduled date. |
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
 | `move(block, page, after)` | Moves a block (with its subtree) between pages or positions. |
 | `delete_block(block)` | Removes the block and its subtree. |
 | `set_collapsed(block, bool)` | Persists fold state. |
+| `undo()` / `redo()` | Apply the recorded inverse (or replay it) and return whether anything happened. |
+
+Page creation is deliberately **outside** the history: undoing the first block of a day leaves an empty
+page behind rather than deleting it. A page is an address, and an address that disappears under the
+cursor is worse than one that lingers.
 
 ## Queries
 
@@ -107,6 +114,8 @@ ever visible.
 | --- | --- |
 | `page_by_name(name_key)` | Page row, or none. |
 | `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
+| `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
+| `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | Blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key, each carrying its owning page's name. |
 | `references(page)` | Explicit references from `block_link`, plus plain mentions from `block_fts` matched on `name_key` as whole words and excluding blocks already listed. |
 
@@ -140,14 +149,24 @@ better a clear refusal than a silently damaged graph. Opened files run `PRAGMA f
 
 ## Errors
 
-One typed error enum — `NotFound`, `Conflict` (name clash), `InvalidPosition` (no key exists between the
-neighbours), `Storage` (wrapped sqlite error). No panic on any input the bridge can pass. Every variant
-carries enough context to name the offending page or block in a UI message.
+One typed error enum — `NotFound`, `InvalidPosition` (no key fits between the neighbours), `BadOffset`
+(not on a character boundary), `BadDate`, `SchemaTooNew`, `Storage` (wrapped sqlite error). No panic on any
+input the bridge can pass. Every variant carries enough context to name the offending page or block in a
+UI message.
+
+Dates are validated by round-trip, not by `parse` alone: chrono accepts `2026-4-3`, and a store that
+silently treats it as a second spelling of `2026-04-03` would hand out two keys for one day.
 
 ## Testing
 
-`cargo test` against an in-memory database, no Qt and no fixtures on disk. The cases that must exist:
-insert/indent/outdent keep sibling order stable; moving a subtree across pages keeps links and FTS
-consistent; agenda boundaries at `today`, `today + 7`, `today + 8`, and an overdue item; a `DONE` block
-drops out of the agenda; a plain mention appears in `references` while the linked block appears once, not
-twice; a `[[link]]` deleted from content disappears from `references`.
+`cargo test` against an in-memory database, no Qt and no fixtures on disk — which is only possible because
+this crate has no Qt dependency.
+
+Covered today: sibling order holds through insert, indent, and outdent; a subtree delete restores exactly
+once with one undo, including its order keys; `split_block` is one history entry and refuses an offset
+inside a character; undo crosses days in the order the edits were made; a no-op command records no history;
+reading a day never creates it; journal pages are unique per date; malformed dates are refused.
+
+Not yet covered, and owed by the capabilities that introduce them: restoring a moved subtree across pages
+keeps `block_link` and `block_fts` consistent; agenda boundaries at `today`, `today + 7`, `today + 8`, and
+an overdue item; a `DONE` block dropping out of the agenda; a plain mention appearing once in `references`.

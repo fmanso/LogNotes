@@ -62,6 +62,12 @@ the UI an immutable snapshot of rows. This keeps the GUI thread off the disk, an
 which removes the multi-writer contention that a UI thread plus background jobs would otherwise create.
 Snapshots are cheap because a journal page is one page's rows, not the graph.
 
+As built, a command travels QML invokable → channel → worker; the worker applies it, re-reads the loaded
+days, and posts the rows back with Qt's own thread marshalling before the model is touched. Every command
+answers with a full snapshot rather than a delta — at personal scale the difference is a few hundred rows,
+and it removes any chance of the view drifting from the store. The concrete model surface lives in
+`lognotes-qt`.
+
 **The tree reaches QML flattened.** Views bind to a flat row list carrying a depth field rather than a
 nested QObject tree: one model type serves the journal, a page, and the agenda, and QML renders a list
 with indentation instead of recursing.
@@ -81,6 +87,8 @@ not a view concern — so the same list can later appear elsewhere without reimp
   dates listed as overdue until they are marked `DONE`. *(The 7-day horizon and the overdue rule are
   unconfirmed inferences from the maker's wording, recorded the same way in `lognotes`.)*
 - Only the worker thread touches the connection; the UI holds snapshots, and never a handle to the data.
+- A view never renders note rows before the store has opened: an unreadable database shows an error, never
+  an empty journal.
 - The database file is the only persistent state; deleting it loses nothing that exists elsewhere,
   because nothing else exists.
 
