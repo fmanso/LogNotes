@@ -18,20 +18,39 @@ ApplicationWindow {
     property int focusCursor: 0
     property bool wantsFocus: false
 
+    // Set while a command is in flight. Every command answers with a snapshot, and that snapshot
+    // destroys the focused delegate — so the blur that follows must not queue another save, or each
+    // save would reset the model again and the caret would never come back.
+    property bool rebuilding: false
+    property int focusRetries: 0
+
     Journal {
         id: journal
     }
 
     Component.onCompleted: journal.start()
 
+
     // The app opens ready to type: today's empty block has the caret before the first keystroke.
+    // `revision` fires on every applied snapshot, which `countChanged` cannot do — editing a block
+    // leaves the row count untouched.
     Connections {
         target: journal
+
         function onReadyChanged() {
-            if (journal.ready) {
+            if (journal.ready && root.focusRow < 0) {
                 root.focusRow = root.firstBlockRow()
                 root.focusCursor = 0
                 root.wantsFocus = true
+                root.focusRetries = 0
+                Qt.callLater(root.focusBlock, root.focusRow)
+            }
+        }
+
+        function onRevisionChanged() {
+            root.rebuilding = false
+            if (root.wantsFocus && root.focusRow >= 0) {
+                root.focusRetries = 0
                 Qt.callLater(root.focusBlock, root.focusRow)
             }
         }
@@ -49,26 +68,49 @@ ApplicationWindow {
 
     Shortcut {
         sequences: ["Ctrl+Z"]
-        onActivated: journal.undo()
+        onActivated: {
+            root.rebuilding = true
+            journal.undo()
+        }
     }
 
     Shortcut {
         sequences: ["Ctrl+Shift+Z"]
-        onActivated: journal.redo()
+        onActivated: {
+            root.rebuilding = true
+            journal.redo()
+        }
     }
 
     function focusBlock(row) {
+        if (row < 0 || row >= list.count) {
+            return false
+        }
         root.focusRow = row
         root.wantsFocus = true
-        for (let i = Math.max(0, row); i < list.count; i++) {
-            const item = list.itemAtIndex(i)
-            if (item && item.blockEditor) {
-                item.blockEditor.forceActiveFocus()
-                list.currentIndex = i
-                return true
-            }
+        list.currentIndex = row
+        list.positionViewAtIndex(row, ListView.Contain)
+
+        const item = list.itemAtIndex(row)
+        if (item && item.blockEditor && !item.isHeading) {
+            item.blockEditor.forceActiveFocus()
+            root.focusCursor = Math.min(root.focusCursor, item.blockEditor.length)
+            item.blockEditor.cursorPosition = root.focusCursor
+            return true
+        }
+
+        // The delegate for this row is not instantiated yet; try again on the next frame.
+        if (root.focusRetries < 8) {
+            root.focusRetries += 1
+            focusRetry.restart()
         }
         return false
+    }
+
+    Timer {
+        id: focusRetry
+        interval: 16
+        onTriggered: root.focusBlock(root.focusRow)
     }
 
     ListView {
@@ -86,16 +128,8 @@ ApplicationWindow {
         // Days load lazily backwards: reaching the end of what is loaded pulls in a chunk older.
         onAtYEndChanged: {
             if (atYEnd && count > 0) {
+                root.rebuilding = true
                 journal.load_more()
-            }
-        }
-
-        onCountChanged: {
-            if (root.wantsFocus && root.focusRow >= 0) {
-                if (root.focusRow >= count) {
-                    root.focusRow = count - 1
-                }
-                Qt.callLater(root.focusBlock, root.focusRow)
             }
         }
 
@@ -106,6 +140,7 @@ ApplicationWindow {
 
             property alias blockEditor: editor
             property bool isBlock: kind !== "heading"
+            property bool isHeading: kind === "heading"
 
             Label {
                 id: heading
@@ -165,8 +200,9 @@ ApplicationWindow {
                             if (root.wantsFocus) {
                                 cursorPosition = Math.min(root.focusCursor, length)
                             }
-                        } else if (debounce.running) {
+                        } else if (debounce.running && !root.rebuilding) {
                             debounce.stop()
+                            root.rebuilding = true
                             journal.edit(index, editor.text)
                         }
                     }
@@ -175,7 +211,10 @@ ApplicationWindow {
                     Timer {
                         id: debounce
                         interval: 250
-                        onTriggered: journal.edit(index, editor.text)
+                        onTriggered: {
+                            root.rebuilding = true
+                            journal.edit(index, editor.text)
+                        }
                     }
 
                     onTextEdited: {
@@ -192,15 +231,18 @@ ApplicationWindow {
                             root.focusRow = index + 1
                             root.focusCursor = 0
                             root.wantsFocus = true
+                            root.rebuilding = true
                             journal.submit_block(index, cursorPosition, text)
                             event.accepted = true
                         } else if (event.key === Qt.Key_Tab) {
                             debounce.stop()
+                            root.rebuilding = true
                             journal.edit(index, text)
                             journal.indent(index)
                             event.accepted = true
                         } else if (event.key === Qt.Key_Backtab) {
                             debounce.stop()
+                            root.rebuilding = true
                             journal.edit(index, text)
                             journal.outdent(index)
                             event.accepted = true
@@ -209,6 +251,7 @@ ApplicationWindow {
                             // core refuses to merge across days, so nothing is lost.
                             debounce.stop()
                             if (!model.placeholder) {
+                                root.rebuilding = true
                                 journal.remove(index)
                             }
                             event.accepted = true

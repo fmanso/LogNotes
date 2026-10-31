@@ -64,6 +64,7 @@ pub mod qobject {
         #[qproperty(bool, ready)]
         #[qproperty(bool, can_undo)]
         #[qproperty(bool, can_redo)]
+        #[qproperty(u64, revision)]
         type Journal = super::JournalRust;
 
         #[cxx_override]
@@ -140,6 +141,9 @@ pub struct JournalRust {
     ready: bool,
     can_undo: bool,
     can_redo: bool,
+    /// Bumped on every applied snapshot. QML restores the caret from this: the row count alone does not
+    /// change when a block is merely edited, so `countChanged` cannot be the trigger.
+    revision: u64,
 }
 
 enum Command {
@@ -353,6 +357,7 @@ impl qobject::Journal {
         if let Some(error) = &outcome.error {
             self.as_mut().set_error(QString::from(error.as_str()));
             self.as_mut().set_ready(false);
+            self.as_mut().bump_revision();
             return;
         }
 
@@ -373,6 +378,12 @@ impl qobject::Journal {
         self.as_mut().set_ready(outcome.ready);
         self.as_mut().set_can_undo(outcome.can_undo);
         self.as_mut().set_can_redo(outcome.can_redo);
+        self.as_mut().bump_revision();
+    }
+
+    fn bump_revision(mut self: Pin<&mut Self>) {
+        let next = self.revision.wrapping_add(1);
+        self.as_mut().set_revision(next);
     }
 }
 

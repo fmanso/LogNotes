@@ -63,9 +63,14 @@ list by `CHUNK_DAYS` (14) and asks for a snapshot of the larger window.
   QML for `journal.<name>(` calls and asserts each is a declared `#[qinvokable]`.
 - **The debounce is in QML** (250 ms), because the timer is a view concern and Qt already has one. Only
   structural keys — Enter, Tab, Shift+Tab, Backspace on an empty block — flush immediately.
-- **Every save resets the model**, which destroys the focused delegate. The window therefore tracks
-  `focusRow` and `focusCursor` and restores them after the rebuild; this is the reason the delegate
-  recreates the caret rather than the model preserving selection.
+- **Every save resets the model**, which destroys the focused delegate. Two things follow, and both are
+  load-bearing: the model exposes a `revision` counter bumped on each applied snapshot (the row count does
+  not change when a block is merely edited, so `countChanged` cannot be the trigger), and the window keeps
+  `focusRow`/`focusCursor` and restores them on every revision.
+- **A blur caused by that rebuild must not save again.** The delegate's focus-out handler would otherwise
+  queue an edit, whose snapshot resets the model once more — and since the row count is unchanged the
+  second time, no restore fires and the caret is simply gone. A `rebuilding` flag, set when any command is
+  dispatched and cleared when its snapshot arrives, suppresses exactly that save.
 - **Backspace on an empty block deletes; on a day's first block it simply does nothing** beyond clearing
   text, because the core refuses to merge across pages.
 - **Nothing here renders task markers or links yet** — the roles exist in the schema, but `data` does not
