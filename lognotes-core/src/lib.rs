@@ -9,8 +9,9 @@ mod error;
 mod model;
 mod order;
 mod store;
+mod text;
 
 pub use error::{Error, Result};
-pub use model::{AgendaRow, BlockRow, JournalDay, Marker, Page, PageKind};
+pub use model::{AgendaRow, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind, ReferenceRow};
 pub use order::key_between;
 pub use store::Store;

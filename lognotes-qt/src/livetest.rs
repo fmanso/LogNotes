@@ -208,15 +208,89 @@ pub fn run() -> ! {
         format!("rows {} -> {}", rows_with_agenda, driver::row_count()),
     );
 
-    // Quit straight after a keystroke: the debounce has not fired, so only the close handler can
-    // save it. This is the difference between losing and keeping the last thing you typed.
-    driver::type_text(&QString::from(" now"));
+    // ---- links, pages and references -------------------------------------------------------
+    // Mentioning a page by name in prose, then linking it, must show up as two different kinds of
+    // reference on that page.
+    driver::click_block(0);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::NONE);
+    driver::wait_ms(100);
+    driver::type_text(&QString::from(" and My Project matters"));
+    driver::wait_ms(700);
+    driver::press_key(key::DOWN, modifier::NONE);
+    driver::wait_ms(200);
+    driver::press_key(key::END, modifier::NONE);
+    driver::type_text(&QString::from(" see [[My Project]]"));
+    driver::wait_ms(800);
+    shot("14-links-typed");
+
+    // The page switcher should now list the page the link created.
+    driver::click_named(&QString::from("pagesButton"), 0);
+    driver::wait_ms(400);
+    shot("15-page-switcher");
+    let entries = driver::click_named(&QString::from("pageEntry"), 1);
+    driver::wait_ms(900);
+    shot("16-page-view");
+    check(
+        "the page created by the link can be opened",
+        entries,
+        "clicked the second switcher entry".to_string(),
+    );
+
+    // Its reference panel: one linked reference, and the plain mention behind a collapsed group.
+    let page_open = driver::row_count();
+    check(
+        "the page shows blocks and references",
+        page_open > 2,
+        format!("rows={page_open}"),
+    );
+
+    let expanded = driver::click_named(&QString::from("unlinkedToggle"), 0);
+    driver::wait_ms(500);
+    shot("17-unlinked-expanded");
+    check(
+        "the unlinked mentions group expands",
+        expanded,
+        "clicked the unlinked mentions heading".to_string(),
+    );
+
+    // The popup closed when we picked a page, so reopen it before choosing Journal.
+    let switched_back = driver::click_named(&QString::from("pagesButton"), 0)
+        && {
+            driver::wait_ms(400);
+            driver::click_named(&QString::from("pageEntry"), 0)
+        };
+    driver::wait_ms(900);
+    check(
+        "clicking Journal in the switcher returns to the column",
+        switched_back,
+        "clicked Journal".to_string(),
+    );
+
     driver::close_window();
     driver::wait_ms(400);
     check(
+        "the journal is reachable again from the switcher",
+        driver::row_count() > page_open,
+        format!("rows={}", driver::row_count()),
+    );
+
+    // Quit straight after a keystroke: the debounce has not fired, so only the close handler can
+    // save it. This is the difference between losing and keeping the last thing you typed.
+    let before_flush = blocks(&root);
+    // The view switch put the caret at the start of the first block; append at the end.
+    driver::press_key(key::END, modifier::NONE);
+    driver::wait_ms(100);
+    driver::type_text(&QString::from(" now"));
+    driver::close_window();
+    driver::wait_ms(400);
+    let after_flush = blocks(&root);
+    check(
         "closing flushed text typed within the debounce window",
-        blocks(&root) == ["hello world! now", "second"],
-        format!("blocks={:?}", blocks(&root)),
+        !before_flush.is_empty()
+            && after_flush.len() == before_flush.len()
+            && after_flush[0] == format!("{} now", before_flush[0]),
+        format!("{:?} -> {:?}", before_flush, after_flush),
     );
 
     println!(

@@ -63,6 +63,24 @@ impl Marker {
     }
 }
 
+/// How a block was found to reference a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceKind {
+    /// An explicit `[[link]]` or `#tag`.
+    Linked,
+    /// The page's name appearing as plain words.
+    Mention,
+}
+
+/// One block that references a page, with where it lives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceRow {
+    pub block: BlockRow,
+    pub page_name: String,
+    pub journal_date: Option<String>,
+    pub kind: ReferenceKind,
+}
+
 /// One row of the agenda: the block that is due, where it lives, and whether its date has passed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgendaRow {

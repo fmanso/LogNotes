@@ -13,7 +13,7 @@ use std::thread;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QModelIndex, QString, QVariant};
-use lognotes_core::{AgendaRow, BlockRow, Marker, Store};
+use lognotes_core::{AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, Store};
 
 use qobject::{Journal, QHash_i32_QByteArray, Role};
 
@@ -127,6 +127,18 @@ pub mod qobject {
         #[qinvokable]
         fn set_marker(self: Pin<&mut Self>, row: i32, marker: &QString);
 
+        /// Show the journal column again.
+        #[qinvokable]
+        fn show_journal(self: Pin<&mut Self>);
+
+        /// Open a named page: its blocks and its references. Creates the page if it does not exist.
+        #[qinvokable]
+        fn open_page(self: Pin<&mut Self>, name: &QString);
+
+        /// The named pages, as a JSON array of strings, for the page switcher.
+        #[qinvokable]
+        fn page_names(self: Pin<&mut Self>) -> QString;
+
         #[qinvokable]
         fn undo(self: Pin<&mut Self>);
 
@@ -153,6 +165,11 @@ enum Kind {
     Placeholder,
     AgendaHeader,
     AgendaRow,
+    PageHeader,
+    ReferenceHeader,
+    ReferenceRow,
+    UnlinkedHeader,
+    UnlinkedRow,
 }
 
 /// One row of the column: a date heading, a block under it, or a row of the agenda.
@@ -171,7 +188,14 @@ struct Row {
 
 impl Row {
     fn is_heading(&self) -> bool {
-        self.kind == Kind::Heading || self.kind == Kind::AgendaHeader
+        matches!(
+            self.kind,
+            Kind::Heading
+                | Kind::AgendaHeader
+                | Kind::PageHeader
+                | Kind::ReferenceHeader
+                | Kind::UnlinkedHeader
+        )
     }
 
     fn is_editable_block(&self) -> bool {
@@ -179,15 +203,27 @@ impl Row {
     }
 }
 
+/// What the column is showing.
+#[derive(Clone, Default, PartialEq)]
+enum Mode {
+    #[default]
+    Journal,
+    Page(String),
+}
+
 #[derive(Default)]
 pub struct JournalRust {
     rows: Vec<Row>,
+    mode: Mode,
     dates: Vec<String>,
     worker: Option<Sender<Job>>,
     error: QString,
     ready: bool,
     can_undo: bool,
     can_redo: bool,
+    /// JSON array of the named pages, refreshed with every snapshot so the switcher can read it
+    /// without a round trip to the worker.
+    page_names: String,
     /// Bumped on every applied snapshot. QML restores the caret from this: the row count alone does not
     /// change when a block is merely edited, so `countChanged` cannot be the trigger.
     revision: u64,
@@ -210,12 +246,14 @@ enum Command {
 enum Job {
     Start {
         dates: Vec<String>,
+        mode: Mode,
         queue: CxxQtThread<Journal>,
     },
     /// Run an optional command, then hand back a fresh snapshot of `dates`.
     Run {
         command: Option<Command>,
         dates: Vec<String>,
+        mode: Mode,
         queue: CxxQtThread<Journal>,
     },
     /// Run a command and signal completion, so the caller can wait for the write to land.
@@ -230,6 +268,10 @@ struct Outcome {
     error: Option<String>,
     days: Vec<(String, Vec<BlockRow>)>,
     agenda: Vec<AgendaRow>,
+    /// Set when the column is showing a named page: its name, its blocks, its references.
+    page: Option<(String, Vec<BlockRow>, Vec<ReferenceRow>)>,
+    /// JSON array of named pages, for the switcher.
+    page_names: String,
     ready: bool,
     can_undo: bool,
     can_redo: bool,
@@ -272,6 +314,11 @@ impl qobject::Journal {
                     Kind::Placeholder => "placeholder",
                     Kind::AgendaHeader => "agenda-header",
                     Kind::AgendaRow => "agenda-row",
+                    Kind::PageHeader => "page-header",
+                    Kind::ReferenceHeader => "reference-header",
+                    Kind::ReferenceRow => "reference-row",
+                    Kind::UnlinkedHeader => "unlinked-header",
+                    Kind::UnlinkedRow => "unlinked-row",
                 };
                 QVariant::from(&QString::from(kind))
             }
@@ -323,7 +370,8 @@ impl qobject::Journal {
         }
 
         let queue = self.as_mut().qt_thread();
-        self.send(Job::Start { dates, queue });
+        let mode = self.mode.clone();
+        self.send(Job::Start { dates, mode, queue });
     }
 
     fn load_more(mut self: Pin<&mut Self>) {
@@ -338,9 +386,11 @@ impl qobject::Journal {
         self.as_mut().rust_mut().dates = dates.clone();
 
         let queue = self.as_mut().qt_thread();
+        let mode = self.mode.clone();
         self.send(Job::Run {
             command: None,
             dates,
+            mode,
             queue,
         });
     }
@@ -452,6 +502,26 @@ impl qobject::Journal {
         }
     }
 
+    fn show_journal(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().mode = Mode::Journal;
+        self.as_mut().dispatch(None);
+    }
+
+    fn open_page(mut self: Pin<&mut Self>, name: &QString) {
+        let name = name.to_string();
+        if name.trim().is_empty() {
+            return;
+        }
+        self.as_mut().rust_mut().mode = Mode::Page(name);
+        self.as_mut().dispatch(None);
+    }
+
+    fn page_names(self: Pin<&mut Self>) -> QString {
+        // Read on the GUI thread from the worker would need a round trip; the model keeps the last
+        // known list instead, refreshed with every snapshot.
+        QString::from(self.page_names.as_str())
+    }
+
     fn undo(mut self: Pin<&mut Self>) {
         self.as_mut().dispatch(Some(Command::Undo));
     }
@@ -466,9 +536,11 @@ impl qobject::Journal {
             return;
         }
         let queue = self.as_mut().qt_thread();
+        let mode = self.mode.clone();
         self.send(Job::Run {
             command,
             dates,
+            mode,
             queue,
         });
     }
@@ -486,6 +558,24 @@ impl qobject::Journal {
         {
             let agenda = agenda_rows(&outcome.agenda);
             let mut rows = Vec::new();
+            if let Some((name, blocks, references)) = &outcome.page {
+                rows.push(page_header(name));
+                rows.extend(day_rows(name, blocks).into_iter().skip(1));
+                rows.extend(reference_rows(references));
+                let mut rust = self.as_mut().rust_mut();
+                rust.rows = rows;
+                rust.can_undo = outcome.can_undo;
+                rust.can_redo = outcome.can_redo;
+                rust.page_names = outcome.page_names.clone();
+                drop(rust);
+                self.as_mut().end_reset_model();
+                self.as_mut().set_error(QString::from(""));
+                self.as_mut().set_ready(true);
+                self.as_mut().set_can_undo(outcome.can_undo);
+                self.as_mut().set_can_redo(outcome.can_redo);
+                self.as_mut().bump_revision();
+                return;
+            }
             for (index, (date, blocks)) in outcome.days.iter().enumerate() {
                 if index == 1 && !agenda.is_empty() {
                     // "Right under today's blocks": today is the newest day in the column.
@@ -501,6 +591,7 @@ impl qobject::Journal {
             rust.rows = rows;
             rust.can_undo = outcome.can_undo;
             rust.can_redo = outcome.can_redo;
+            rust.page_names = outcome.page_names.clone();
         }
         self.as_mut().end_reset_model();
 
@@ -522,7 +613,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
 
     while let Ok(job) = rx.recv() {
         match job {
-            Job::Start { dates, queue } => {
+            Job::Start { dates, mode, queue } => {
                 let opened = match DATABASE_PATH.get() {
                     // The storage error already names the file, so it is not appended again.
                     Some(path) => Store::open(path).map_err(|error| error.to_string()),
@@ -530,7 +621,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 };
                 match opened {
                     Ok(opened) => {
-                        let outcome = snapshot(&opened, &dates);
+                        let outcome = snapshot(&opened, &dates, &mode);
                         store = Some(opened);
                         deliver(queue, outcome);
                     }
@@ -540,6 +631,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                             error: Some(error),
                             days: Vec::new(),
                             agenda: Vec::new(),
+                            page: None,
+                            page_names: "[]".to_string(),
                             ready: false,
                             can_undo: false,
                             can_redo: false,
@@ -556,6 +649,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
             Job::Run {
                 command,
                 dates,
+                mode,
                 queue,
             } => {
                 let Some(store) = store.as_mut() else {
@@ -566,11 +660,13 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     None => Ok(()),
                 };
                 let outcome = match run {
-                    Ok(()) => snapshot(store, &dates),
+                    Ok(()) => snapshot(store, &dates, &mode),
                     Err(error) => Outcome {
                         error: Some(error),
                         days: Vec::new(),
                         agenda: Vec::new(),
+                        page: None,
+                        page_names: page_names_json(store),
                         ready: true,
                         can_undo: store.can_undo(),
                         can_redo: store.can_redo(),
@@ -638,7 +734,29 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
     }
 }
 
-fn snapshot(store: &Store, dates: &[String]) -> Outcome {
+fn snapshot(store: &Store, dates: &[String], mode: &Mode) -> Outcome {
+    if let Mode::Page(name) = mode {
+        let page = store.page_by_name(name).ok().flatten();
+        let (blocks, references) = match &page {
+            Some(page) => (
+                store.page_blocks(page.id).unwrap_or_default(),
+                store.references(page.id).unwrap_or_default(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        return Outcome {
+            error: None,
+            days: Vec::new(),
+            agenda: Vec::new(),
+            page: Some((name.clone(), blocks, references)),
+            page_names: page_names_json(store),
+            ready: true,
+            can_undo: store.can_undo(),
+            can_redo: store.can_redo(),
+        };
+    }
+
+
     let days = dates
         .iter()
         .map(|date| {
@@ -657,6 +775,8 @@ fn snapshot(store: &Store, dates: &[String]) -> Outcome {
         error: None,
         days,
         agenda,
+        page: None,
+        page_names: page_names_json(store),
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
@@ -706,6 +826,95 @@ fn day_rows(date: &str, blocks: &[BlockRow]) -> Vec<Row> {
         overdue: false,
     }));
     rows
+}
+
+fn page_header(name: &str) -> Row {
+    Row {
+        kind: Kind::PageHeader,
+        date: String::new(),
+        block_id: -1,
+        depth: 0,
+        text: name.to_string(),
+        marker: None,
+        scheduled: None,
+        source: String::new(),
+        overdue: false,
+    }
+}
+
+/// The reference panels: explicit links first, then a collapsed group of plain mentions.
+fn reference_rows(references: &[ReferenceRow]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let linked: Vec<&ReferenceRow> = references
+        .iter()
+        .filter(|entry| entry.kind == ReferenceKind::Linked)
+        .collect();
+    let mentions: Vec<&ReferenceRow> = references
+        .iter()
+        .filter(|entry| entry.kind == ReferenceKind::Mention)
+        .collect();
+
+    if !linked.is_empty() {
+        rows.push(section_row(Kind::ReferenceHeader, "Linked References"));
+        rows.extend(linked.into_iter().map(|entry| reference_row(entry, Kind::ReferenceRow)));
+    }
+
+    if !mentions.is_empty() {
+        rows.push(section_row(
+            Kind::UnlinkedHeader,
+            &format!("Unlinked mentions ({})", mentions.len()),
+        ));
+        rows.extend(
+            mentions
+                .into_iter()
+                .map(|entry| reference_row(entry, Kind::UnlinkedRow)),
+        );
+    }
+
+    rows
+}
+
+fn section_row(kind: Kind, text: &str) -> Row {
+    Row {
+        kind,
+        date: String::new(),
+        block_id: -1,
+        depth: 0,
+        text: text.to_string(),
+        marker: None,
+        scheduled: None,
+        source: String::new(),
+        overdue: false,
+    }
+}
+
+fn reference_row(entry: &ReferenceRow, kind: Kind) -> Row {
+    Row {
+        kind,
+        date: String::new(),
+        block_id: entry.block.id as i32,
+        depth: 0,
+        text: entry.block.content.clone(),
+        marker: entry.block.marker,
+        scheduled: None,
+        source: entry
+            .journal_date
+            .clone()
+            .unwrap_or_else(|| entry.page_name.clone()),
+        overdue: false,
+    }
+}
+
+fn page_names_json(store: &Store) -> String {
+    let names: Vec<String> = store
+        .pages()
+        .map(|pages| pages.into_iter().map(|page| page.name).collect())
+        .unwrap_or_default();
+    let quoted: Vec<String> = names
+        .iter()
+        .map(|name| format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("[{}]", quoted.join(","))
 }
 
 /// The scheduled section that sits directly under today's blocks. Absent entirely when nothing is due.

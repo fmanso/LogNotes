@@ -29,6 +29,21 @@ ApplicationWindow {
     // window closes: the process exits before the timer fires.
     property var unsaved: ({})
 
+    // The unlinked-mentions group is collapsed until you ask for it; 0.x behaviour, and it keeps a
+    // page's reference panel short.
+    property bool unlinkedExpanded: false
+    // Switching views replaces every row, so the caret has to be placed somewhere afterwards.
+    property bool pendingViewFocus: false
+    property var pageList: []
+
+    function refreshPages() {
+        try {
+            root.pageList = JSON.parse(journal.page_names())
+        } catch (error) {
+            root.pageList = []
+        }
+    }
+
     function flushUnsaved() {
         for (const row in root.unsaved) {
             journal.save_now(Number(row), root.unsaved[row])
@@ -65,6 +80,15 @@ ApplicationWindow {
 
         function onRevisionChanged() {
             root.rebuilding = false
+            root.refreshPages()
+            if (root.pendingViewFocus) {
+                root.pendingViewFocus = false
+                root.focusRow = root.firstBlockRow()
+                root.focusCursor = 0
+                root.wantsFocus = true
+                root.focusRetries = 0
+                Qt.callLater(root.focusBlock, root.focusRow)
+            }
             // Every applied snapshot means the pending text has been written.
             root.unsaved = ({})
             if (root.wantsFocus && root.focusRow >= 0) {
@@ -277,10 +301,110 @@ ApplicationWindow {
 
     }
 
+    // A slim bar: what you are looking at, and the way to something else.
+    Rectangle {
+        id: topBar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 40
+        color: "#f2efe9"
+
+        Row {
+            anchors.left: parent.left
+            anchors.leftMargin: 28
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 10
+
+            Button {
+                objectName: "pagesButton"
+                text: qsTr("Pages")
+                onClicked: pagesPopup.open()
+            }
+        }
+    }
+
+    Popup {
+        id: pagesPopup
+        parent: Overlay.overlay
+        x: 28
+        y: 44
+        width: 320
+        height: Math.min(400, 44 + (root.pageList.length + 1) * 30)
+        modal: false
+        focus: true
+
+        contentItem: Column {
+            spacing: 0
+            focus: true
+
+            Rectangle {
+                objectName: "pageEntry"
+                width: pagesPopup.width
+                height: 30
+                color: "transparent"
+
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    text: qsTr("Journal")
+                    color: "#242424"
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                        root.unlinkedExpanded = false
+                        root.focusRow = -1
+                        root.pendingViewFocus = true
+                        root.rebuilding = true
+                        journal.show_journal()
+                        pagesPopup.close()
+                    }
+                }
+            }
+
+            Repeater {
+                model: root.pageList
+
+                Rectangle {
+                    objectName: "pageEntry"
+                    width: pagesPopup.width
+                    height: 30
+                    color: "transparent"
+
+                    Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        text: modelData
+                        color: "#242424"
+                        elide: Text.ElideRight
+                        width: parent.width - 24
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.unlinkedExpanded = false
+                            root.focusRow = -1
+                            root.pendingViewFocus = true
+                            root.rebuilding = true
+                            journal.open_page(modelData)
+                            pagesPopup.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     ListView {
         id: list
         anchors.fill: parent
         anchors.margins: 28
+        anchors.topMargin: 56
         model: journal
         spacing: 3
         clip: true
@@ -300,14 +424,20 @@ ApplicationWindow {
         delegate: Item {
             id: rowItem
             width: list.width
-            height: rowItem.isHeading
-                    ? sectionHeading.implicitHeight + 22
-                    : Math.max(blockRow.implicitHeight, 24)
+            height: rowItem.isCollapsedMention
+                    ? 0
+                    : (rowItem.isHeading
+                       ? sectionHeading.implicitHeight + 22
+                       : Math.max(blockRow.implicitHeight, 24))
 
             property alias blockEditor: editor
             property bool isBlock: kind === "block" || kind === "placeholder"
             property bool isHeading: kind === "heading" || kind === "agenda-header"
+                    || kind === "page-header" || kind === "reference-header"
+                    || kind === "unlinked-header"
             property bool isAgenda: kind === "agenda-row"
+            property bool isReference: kind === "reference-row" || kind === "unlinked-row"
+            property bool isCollapsedMention: kind === "unlinked-row" && !root.unlinkedExpanded
             property bool hovered: false
 
             HoverHandler {
@@ -317,6 +447,7 @@ ApplicationWindow {
             // A date heading, or the "Scheduled" section heading.
             Label {
                 id: sectionHeading
+                objectName: kind === "unlinked-header" ? "unlinkedToggle" : ""
                 visible: rowItem.isHeading
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
@@ -324,17 +455,25 @@ ApplicationWindow {
                 text: kind === "heading"
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
                       : model.text
-                color: "#5b5b5b"
-                font.pixelSize: kind === "heading" ? 15 : 13
+                color: kind === "page-header" ? "#242424" : "#5b5b5b"
+                font.pixelSize: kind === "heading" ? 15 : (kind === "page-header" ? 22 : 13)
                 font.bold: true
-                font.capitalization: kind === "heading" ? Font.MixedCase : Font.AllUppercase
+                font.capitalization: (kind === "heading" || kind === "page-header")
+                                     ? Font.MixedCase : Font.AllUppercase
+
+                // The mentions group is the one heading you can click.
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: kind === "unlinked-header"
+                    onClicked: root.unlinkedExpanded = !root.unlinkedExpanded
+                }
             }
 
             // Anchored layout rather than a Row: an editor whose width is computed from its own
             // x inside a Row is a binding loop, and Qt resolves it by collapsing the width to 0.
             Item {
                 id: blockRow
-                visible: !rowItem.isHeading
+                visible: !rowItem.isHeading && !rowItem.isCollapsedMention
                 width: parent.width
                 height: Math.max(editor.visible ? editor.implicitHeight : 0, 24)
 
@@ -522,7 +661,7 @@ ApplicationWindow {
                 // An agenda row is the same block seen from today: read it, or check it off here.
                 Label {
                     id: agendaText
-                    visible: rowItem.isAgenda
+                    visible: rowItem.isAgenda || rowItem.isReference
                     anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
                     anchors.leftMargin: 8
                     anchors.right: sourceLabel.left
@@ -536,10 +675,14 @@ ApplicationWindow {
 
                 Label {
                     id: sourceLabel
-                    visible: rowItem.isAgenda
+                    visible: rowItem.isAgenda || rowItem.isReference
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     text: {
+                        if (rowItem.isReference) {
+                            const isDate = /^\d{4}-\d{2}-\d{2}$/.test(model.source)
+                            return isDate ? "from " + formatDay(model.source) : "from " + model.source
+                        }
                         if (!rowItem.isAgenda) {
                             return ""
                         }

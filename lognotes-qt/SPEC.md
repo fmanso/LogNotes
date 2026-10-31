@@ -39,6 +39,9 @@ carried in the `kind` role:
 | `placeholder` | The block an untouched day shows so the cursor has somewhere to land. `blockId` is `-1` and **nothing is written** until the first keystroke. |
 | `agenda-header` | The `Scheduled` heading, present only when something is due. |
 | `agenda-row` | A due block, spliced directly under today's blocks; carries the same `blockId`, so acting on it acts on the block. |
+| `page-header` | The name of the page being viewed. |
+| `reference-header` / `reference-row` | `Linked References` and the blocks that link this page. |
+| `unlinked-header` / `unlinked-row` | The collapsed `Unlinked mentions (N)` group and its rows. |
 
 Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `scheduled`, `source`,
 `overdue`. Dates stay ISO `YYYY-MM-DD` in the
@@ -46,6 +49,21 @@ model and are formatted in QML — the core never learns a locale, and the view 
 
 Placeholder rows are why scrolling a year into the past cannot bloat the database: only a keystroke
 materialises a day (`ensure_journal_page` + insert). This is a view-layer rule, not a schema one.
+
+## Two views
+
+The model shows either the journal column or one named page. `open_page(name)` / `show_journal()` set the
+mode, which is carried to the worker with every job so each snapshot is built for the view that asked for
+it: a page snapshot is its blocks plus `references(page)`; a journal snapshot is days plus the agenda.
+
+The page list for the switcher rides along with each snapshot as a JSON array (`page_names`), so opening the
+switcher costs no round trip. Switching views replaces every row, so QML sets `pendingViewFocus` and puts the
+caret in the new view's first block once its snapshot lands — without that, the caret is nowhere and typing
+after a switch goes into the void.
+
+The collapsed state of the unlinked-mentions group is view-only state (`unlinkedExpanded`); the rows are
+always in the model, at height 0 while collapsed. Keeping the model unaware of it means the toggle costs no
+query.
 
 ## Threading and delivery
 
@@ -130,7 +148,9 @@ cargo run -p lognotes-qt --features driver -- --livetest
 It writes to a throwaway database under `$TMPDIR/lognotes-livetest`, loads the same `main.qml` the app
 loads, and drives it through the real input path: typing, Enter, Tab, Shift+Tab, Ctrl+Z, a mouse click on
 a block, wheel scrolling to pull in an older chunk, Ctrl+Enter to mark a block, Ctrl+Shift+S then Enter to
-schedule it, clicking the agenda checkbox to complete it, and finally a close with a pending debounce. Each step
+schedule it, clicking the agenda checkbox to complete it, typing `[[My Project]]` to create and link a page,
+opening that page from the switcher, expanding its unlinked mentions, and finally a close with a pending
+debounce. Each step
 is checked against the stored rows and depths, and every step saves a PNG so a human (or a reviewing agent)
 can see the rendered window rather than trust a passing assertion.
 

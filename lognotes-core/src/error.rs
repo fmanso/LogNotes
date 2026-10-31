@@ -13,6 +13,9 @@ pub enum Error {
         next: Option<String>,
     },
 
+    #[error("a page needs a name")]
+    BadPageName,
+
     #[error("offset {0} is not on a character boundary")]
     BadOffset(usize),
 

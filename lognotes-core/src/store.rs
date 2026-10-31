@@ -10,10 +10,13 @@ use chrono::{Days, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Error, Result};
-use crate::model::{AgendaRow, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind};
+use crate::model::{
+    AgendaRow, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind, ReferenceRow,
+};
 use crate::order::key_between;
+use crate::text::{extract_links, mentions_whole_words};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE page (
@@ -54,6 +57,22 @@ CREATE TABLE block_link (
 CREATE INDEX block_link_page ON block_link (page_id);
 
 CREATE VIRTUAL TABLE block_fts USING fts5 (content, content = 'block', content_rowid = 'id');
+"#;
+
+/// v2: the full-text index has to follow block writes. Triggers are the mechanism FTS5 external-content
+/// tables expect — keeping it current by hand means every write path has to remember.
+const SCHEMA_V2: &str = r#"
+CREATE TRIGGER block_fts_insert AFTER INSERT ON block BEGIN
+  INSERT INTO block_fts (rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER block_fts_delete AFTER DELETE ON block BEGIN
+  INSERT INTO block_fts (block_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+CREATE TRIGGER block_fts_update AFTER UPDATE OF content ON block BEGIN
+  INSERT INTO block_fts (block_fts, rowid, content) VALUES ('delete', old.id, old.content);
+  INSERT INTO block_fts (rowid, content) VALUES (new.id, new.content);
+END;
+INSERT INTO block_fts (block_fts) VALUES ('rebuild');
 "#;
 
 /// One reversible mutation. `apply` performs an action and returns the action that undoes it, which is
@@ -149,6 +168,23 @@ impl Store {
                 read_page,
             )
             .optional()?)
+    }
+
+    /// Find or create a named page — what a `[[link]]` or `#tag` does when it names something new.
+    pub fn ensure_page(&mut self, name: &str) -> Result<i64> {
+        ensure_page_on(&self.conn, name)
+    }
+
+    /// Every named page, for the page switcher. Journal days are not pages you navigate to.
+    pub fn pages(&self) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, name_key, kind, journal_date FROM page
+             WHERE kind = 'page' ORDER BY name_key",
+        )?;
+        let pages = stmt
+            .query_map([], read_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pages)
     }
 
     /// Look up a journal day without creating it. Reading is not writing.
@@ -422,6 +458,73 @@ impl Store {
             .collect())
     }
 
+    /// Blocks that reference `page`: explicit links first, then plain mentions.
+    ///
+    /// Mentions come from the full-text index, minus the blocks that already link, and are matched on
+    /// whole words so a page called "Pla" is not "found" inside "Plastic".
+    pub fn references(&self, page_id: i64) -> Result<Vec<ReferenceRow>> {
+        let page = self.page(page_id)?;
+        let mut out = Vec::new();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.parent_id, b.order_key, b.content, b.marker, b.scheduled_date, b.collapsed,
+                    p.name, p.journal_date
+             FROM block_link l
+             JOIN block b ON b.id = l.block_id
+             JOIN page p ON p.id = b.page_id
+             WHERE l.page_id = ?1
+             ORDER BY p.journal_date IS NULL, p.journal_date DESC, b.order_key",
+        )?;
+        let linked = stmt
+            .query_map([page_id], |row| {
+                Ok(ReferenceRow {
+                    block: read_block_row(row, 0)?,
+                    page_name: row.get(7)?,
+                    journal_date: row.get(8)?,
+                    kind: ReferenceKind::Linked,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let linked_ids: Vec<i64> = linked.iter().map(|row| row.block.id).collect();
+        out.extend(linked);
+
+        let trimmed = page.name.trim();
+        if trimmed.is_empty() {
+            return Ok(out);
+        }
+
+        // Quoted so FTS treats it as a phrase rather than a query.
+        let query = format!("\"{}\"", trimmed.replace('"', ""));
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.parent_id, b.order_key, b.content, b.marker, b.scheduled_date, b.collapsed,
+                    p.name, p.journal_date
+             FROM block_fts f
+             JOIN block b ON b.id = f.rowid
+             JOIN page p ON p.id = b.page_id
+             WHERE block_fts MATCH ?1
+             ORDER BY p.journal_date IS NULL, p.journal_date DESC, b.order_key
+             LIMIT 200",
+        )?;
+        let mentions = stmt
+            .query_map([query], |row| {
+                Ok(ReferenceRow {
+                    block: read_block_row(row, 0)?,
+                    page_name: row.get(7)?,
+                    journal_date: row.get(8)?,
+                    kind: ReferenceKind::Mention,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        out.extend(
+            mentions
+                .into_iter()
+                .filter(|row| !linked_ids.contains(&row.block.id))
+                .filter(|row| mentions_whole_words(&row.block.content, trimmed)),
+        );
+        Ok(out)
+    }
+
     /// Delete a block and everything under it. One undo step restores the whole subtree.
     pub fn delete_block(&mut self, block_id: i64) -> Result<()> {
         self.exec(Action::Delete { block_id })
@@ -557,6 +660,70 @@ impl Store {
     }
 }
 
+fn ensure_page_on(conn: &Connection, name: &str) -> Result<i64> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::BadPageName);
+    }
+    let key = trimmed.to_lowercase();
+
+    if let Some(id) = conn
+        .query_row("SELECT id FROM page WHERE name_key = ?1", [&key], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?
+    {
+        return Ok(id);
+    }
+
+    let now = now();
+    conn.execute(
+        "INSERT INTO page (name, name_key, kind, journal_date, created_at, updated_at)
+         VALUES (?1, ?2, 'page', NULL, ?3, ?3)",
+        params![trimmed, key, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Rebuild a block's derived link rows from its text. Called on every write, inside the same
+/// transaction, so the derived state can never lag the text it came from.
+fn reindex(conn: &Connection, block_id: i64) -> Result<()> {
+    let content: Option<String> = conn
+        .query_row("SELECT content FROM block WHERE id = ?1", [block_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let Some(content) = content else {
+        return Ok(());
+    };
+
+    conn.execute("DELETE FROM block_link WHERE block_id = ?1", [block_id])?;
+    for link in extract_links(&content) {
+        let page_id = ensure_page_on(conn, &link.target)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO block_link (block_id, page_id, kind) VALUES (?1, ?2, ?3)",
+            params![block_id, page_id, link.kind],
+        )?;
+    }
+    Ok(())
+}
+
+fn read_block_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<BlockRow> {
+    Ok(BlockRow {
+        id: row.get(offset)?,
+        parent_id: row.get(offset + 1)?,
+        depth: 0,
+        order_key: row.get(offset + 2)?,
+        content: row.get(offset + 3)?,
+        marker: row
+            .get::<_, Option<String>>(offset + 4)?
+            .as_deref()
+            .and_then(Marker::parse),
+        scheduled_date: row.get(offset + 5)?,
+        collapsed: row.get(offset + 6)?,
+    })
+}
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > SCHEMA_VERSION {
@@ -568,6 +735,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 1 {
         conn.execute_batch(SCHEMA)?;
+    }
+    if version < 2 {
+        conn.execute_batch(SCHEMA_V2)?;
     }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
@@ -586,6 +756,7 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
                 "UPDATE block SET content = ?2, updated_at = ?3 WHERE id = ?1",
                 params![block_id, content, now()],
             )?;
+            reindex(conn, *block_id)?;
             Ok(Action::SetContent {
                 block_id: *block_id,
                 content: old,
@@ -593,6 +764,7 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
         }
         Action::Insert { record } => {
             insert_row(conn, record)?;
+            reindex(conn, record.id)?;
             Ok(Action::Delete {
                 block_id: record.id,
             })
@@ -605,6 +777,7 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
         Action::InsertSubtree { records } => {
             for record in records {
                 insert_row(conn, record)?;
+                reindex(conn, record.id)?;
             }
             records
                 .first()

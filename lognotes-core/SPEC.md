@@ -78,9 +78,10 @@ Two conventions the schema encodes deliberately:
 - **Dates are text in `YYYY-MM-DD`.** Lexicographic order is calendar order, so range predicates stay
   plain string comparisons and no timezone ever enters the store. `scheduled_date` is independent of
   `marker` — a scheduled block that is not a task is legal, and the agenda rule decides what to list.
-- **`block_fts` is an external-content FTS5 table over `block.content`**, maintained by the store on the
-  write path rather than by triggers. One write path means one place that can forget to keep the index
-  honest, and the rebuild is a single `INSERT INTO block_fts(block_fts) VALUES('rebuild')`.
+- **`block_fts` is an external-content FTS5 table over `block.content`**, kept current by the three
+  triggers in schema v2 (`insert`/`delete`/`update OF content`) plus a one-off rebuild. This reverses this
+  document's earlier note that the store would maintain it by hand: for external-content FTS5 the special
+  `'delete'` command needs the *old* text, which only the trigger has. A v1 database upgrades in place.
 
 ## Commands
 
@@ -91,6 +92,7 @@ ever visible.
 | Command | Effect |
 | --- | --- |
 | `create_page(name)` | Creates a page, or returns the existing one whose `name_key` matches. |
+| `ensure_page(name)` | Find-or-create a named page — what extraction calls when `[[Name]]` names something new. Empty names are refused with `BadPageName`. |
 | `journal_page(date)` | **Lookup only**: the journal page for that date, or none. Reading never writes — that is what lets the column scroll past a year of empty days without creating them. |
 | `ensure_journal_page(date)` | Finds or creates the journal page for that date. Called only when something is actually written to the day. |
 | `insert_block(page, after, content)` | New block as the next sibling of `after` (or last child), with a key between its neighbours. |
@@ -115,6 +117,8 @@ cursor is worse than one that lingers.
 | --- | --- |
 | `page_by_name(name_key)` | Page row, or none. |
 | `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
+| `pages()` | Every `kind = 'page'` page, ordered by `name_key` — the page switcher's list. Journal days are excluded: they are reached by scrolling, not by name. |
+| `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
@@ -123,6 +127,17 @@ cursor is worse than one that lingers.
 The agenda rule and its unconfirmed parts are recorded in `lognotes`; this module implements them and
 does not redefine them. The same holds for the invariant that a flat, depth-carrying row list is the shape
 both `page_blocks` and `agenda` return — it is what lets one QML model render every view.
+
+## Derived link state
+
+Extraction runs inside every write that touches block text (`insert_block`, `update_content`, `split_block`,
+and the restore path of a delete's inverse), in the same transaction, so `block_link` can never lag the text
+it came from. `[[Page Name]]` and `#tag` are recognised; spans inside inline code are skipped; aliases and
+`#[[multi word tags]]` are not supported.
+
+Two consequences worth stating: extraction *creates* the pages it names (a link is an assertion the page
+exists), while a plain mention matches only pages that already exist — prose never conjures a page. Pages
+created by extraction stay behind if the link is later removed, like journal pages created by typing.
 
 ## Ordering keys
 
@@ -151,7 +166,7 @@ better a clear refusal than a silently damaged graph. Opened files run `PRAGMA f
 ## Errors
 
 One typed error enum — `NotFound`, `InvalidPosition` (no key fits between the neighbours), `BadOffset`
-(not on a character boundary), `BadDate`, `SchemaTooNew`, `Storage` (wrapped sqlite error). No panic on any
+(not on a character boundary), `BadDate`, `BadPageName`, `SchemaTooNew`, `Storage` (wrapped sqlite error). No panic on any
 input the bridge can pass. Every variant carries enough context to name the offending page or block in a
 UI message.
 
@@ -173,5 +188,10 @@ and `today + 8`; overdue rows flagged and sorted first; a `DONE` block leaving t
 untasked block marking it TODO; clearing a date keeping the marker; and one undo removing both the date and
 the auto-marker.
 
-Not yet covered, and owed by the capabilities that introduce them: restoring a moved subtree across pages
-keeping `block_link` and `block_fts` consistent, and a plain mention appearing once in `references`.
+Also covered: `[[links]]` and `#tags` creating pages; a link becoming a linked reference and disappearing
+when the link is removed; a plain mention appearing once, never duplicating a linked block, and matching
+whole words only; mentions not creating pages; `pages()` listing named pages but not journals; and markers
+and scheduled dates surviving a reindex.
+
+Still owed: restoring a moved subtree across pages keeping `block_link` and `block_fts` consistent (block
+reordering is not a capability yet).
