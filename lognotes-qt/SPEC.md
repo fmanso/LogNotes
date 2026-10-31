@@ -37,8 +37,11 @@ carried in the `kind` role:
 | `heading` | A journal date. Carries `date`; the QML formats it for display. |
 | `block` | A persisted block, carrying `blockId` and `depth`. |
 | `placeholder` | The block an untouched day shows so the cursor has somewhere to land. `blockId` is `-1` and **nothing is written** until the first keystroke. |
+| `agenda-header` | The `Scheduled` heading, present only when something is due. |
+| `agenda-row` | A due block, spliced directly under today's blocks; carries the same `blockId`, so acting on it acts on the block. |
 
-Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`. Dates stay ISO `YYYY-MM-DD` in the
+Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `scheduled`, `source`,
+`overdue`. Dates stay ISO `YYYY-MM-DD` in the
 model and are formatted in QML — the core never learns a locale, and the view never parses a date.
 
 Placeholder rows are why scrolling a year into the past cannot bloat the database: only a keystroke
@@ -66,6 +69,21 @@ list by `CHUNK_DAYS` (14) and asks for a snapshot of the larger window.
 - **cxx-qt does not camelCase Rust identifiers for QML.** `submit_block` is `submit_block` in QML, not
   `submitBlock`. A mismatch compiles and fails only when the key is pressed, so a unit test scans the
   QML for `journal.<name>(` calls and asserts each is a declared `#[qinvokable]`.
+- **The agenda is spliced in by the bridge, not by the column.** `apply` inserts the agenda rows after the
+  first day's blocks when building the row list, which is what places them "right under today" without the
+  list having to know what an agenda is. An empty agenda contributes no rows at all, so there is no heading
+  to hide.
+- **The agenda checkbox completes; the block checkbox cycles.** Checking something off means "done", so an
+  agenda row calls `set_marker(row, "DONE")` rather than the cycle — otherwise one click would only move
+  TODO to DOING and the row would stay.
+- **A block's marker box is only drawn when it says something, or on hover/focus.** An always-visible empty
+  box put a faint square beside every one of the fourteen empty days.
+- **Layout is anchored, not a `Row`.** An editor whose `width` is computed from its own `x` inside a `Row`
+  is a binding loop, and Qt resolves it by collapsing the width to 0 — which looks exactly like "clicking
+  a block does nothing".
+- **Qt 6.12 ships Controls' `Calendar` as a singleton**, so it cannot be instantiated at all
+  ("Composite Singleton Type Calendar is not creatable"). The date picker is built from `MonthGrid` +
+  `DayOfWeekRow` + `CalendarModel`, with a focusable content item so `Enter`/`Esc`/arrow keys work.
 - **The debounce is in QML** (250 ms), because the timer is a view concern and Qt already has one. Only
   structural keys — Enter, Tab, Shift+Tab, Backspace on an empty block — flush immediately.
 - **Every save resets the model**, which destroys the focused delegate. Two things follow, and both are
@@ -111,7 +129,8 @@ cargo run -p lognotes-qt --features driver -- --livetest
 
 It writes to a throwaway database under `$TMPDIR/lognotes-livetest`, loads the same `main.qml` the app
 loads, and drives it through the real input path: typing, Enter, Tab, Shift+Tab, Ctrl+Z, a mouse click on
-a block, wheel scrolling to pull in an older chunk, and finally a close with a pending debounce. Each step
+a block, wheel scrolling to pull in an older chunk, Ctrl+Enter to mark a block, Ctrl+Shift+S then Enter to
+schedule it, clicking the agenda checkbox to complete it, and finally a close with a pending debounce. Each step
 is checked against the stored rows and depths, and every step saves a PNG so a human (or a reviewing agent)
 can see the rendered window rather than trust a passing assertion.
 

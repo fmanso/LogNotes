@@ -156,6 +156,58 @@ pub fn run() -> ! {
         format!("rows {} -> {}", rows_before, driver::row_count()),
     );
 
+    // ---- markers, scheduling and the agenda ------------------------------------------------
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    // Ctrl+Enter marks the focused block.
+    driver::press_key(key::RETURN, modifier::CTRL);
+    driver::wait_ms(700);
+    shot("10-todo");
+    check(
+        "ctrl+enter marks the block TODO",
+        markers(&root) == [Some(lognotes_core::Marker::Todo), None],
+        format!("markers={:?}", markers(&root)),
+    );
+
+    // Ctrl+Shift+S, then Enter accepts today's date.
+    let rows_before_agenda = driver::row_count();
+    driver::press_key(key::S, modifier::CTRL | modifier::SHIFT);
+    driver::wait_ms(400);
+    shot("11-date-picker");
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(800);
+    shot("12-agenda");
+    check(
+        "picking today scheduled the block",
+        scheduled(&root) == [Some(today.clone()), None],
+        format!("scheduled={:?}", scheduled(&root)),
+    );
+    check(
+        "the agenda section appeared under today's blocks",
+        driver::row_count() > rows_before_agenda,
+        format!("rows {} -> {}", rows_before_agenda, driver::row_count()),
+    );
+
+    // Checking it off from the agenda marks the block DONE, and the row leaves.
+    let rows_with_agenda = driver::row_count();
+    check(
+        "the agenda row can be clicked",
+        driver::click_named(&QString::from("agendaCheck"), 0),
+        "clicked the agenda checkbox".to_string(),
+    );
+    driver::wait_ms(800);
+    shot("13-agenda-done");
+    check(
+        "checking it off marks the block DONE",
+        markers(&root).first().copied().flatten() == Some(lognotes_core::Marker::Done),
+        format!("markers={:?}", markers(&root)),
+    );
+    check(
+        "the completed row left the agenda",
+        driver::row_count() < rows_with_agenda,
+        format!("rows {} -> {}", rows_with_agenda, driver::row_count()),
+    );
+
     // Quit straight after a keystroke: the debounce has not fired, so only the close handler can
     // save it. This is the difference between losing and keeping the last thing you typed.
     driver::type_text(&QString::from(" now"));
@@ -190,6 +242,17 @@ fn blocks(root: &std::path::Path) -> Vec<String> {
 
 fn depths(root: &std::path::Path) -> Vec<u32> {
     rows(root).into_iter().map(|block| block.depth).collect()
+}
+
+fn markers(root: &std::path::Path) -> Vec<Option<lognotes_core::Marker>> {
+    rows(root).into_iter().map(|block| block.marker).collect()
+}
+
+fn scheduled(root: &std::path::Path) -> Vec<Option<String>> {
+    rows(root)
+        .into_iter()
+        .map(|block| block.scheduled_date)
+        .collect()
 }
 
 /// The other half of the contract: a database that will not open must show the error pane, not an

@@ -13,7 +13,7 @@ use std::thread;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QModelIndex, QString, QVariant};
-use lognotes_core::{BlockRow, Store};
+use lognotes_core::{AgendaRow, BlockRow, Marker, Store};
 
 use qobject::{Journal, QHash_i32_QByteArray, Role};
 
@@ -26,6 +26,9 @@ pub fn set_database_path(path: impl Into<PathBuf>) {
 
 /// How many days each lazy chunk of the column covers.
 const CHUNK_DAYS: u32 = 14;
+
+/// How far ahead the agenda looks. The rule itself lives in `lognotes`.
+const AGENDA_HORIZON_DAYS: u32 = 7;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -54,6 +57,10 @@ pub mod qobject {
         Date,
         BlockId,
         Placeholder,
+        Marker,
+        Scheduled,
+        Source,
+        Overdue,
     }
 
     unsafe extern "RustQt" {
@@ -108,6 +115,18 @@ pub mod qobject {
         #[qinvokable]
         fn remove(self: Pin<&mut Self>, row: i32);
 
+        /// Cycle a block's marker: none → TODO → DOING → DONE → none.
+        #[qinvokable]
+        fn cycle_marker(self: Pin<&mut Self>, row: i32);
+
+        /// Set or clear a block's scheduled date. An empty string clears it.
+        #[qinvokable]
+        fn set_scheduled(self: Pin<&mut Self>, row: i32, date: &QString);
+
+        /// Set a block's marker directly: "TODO", "DOING", "DONE", or "" to clear it.
+        #[qinvokable]
+        fn set_marker(self: Pin<&mut Self>, row: i32, marker: &QString);
+
         #[qinvokable]
         fn undo(self: Pin<&mut Self>);
 
@@ -126,15 +145,38 @@ pub mod qobject {
     impl cxx_qt::Threading for Journal {}
 }
 
-/// One row of the column: a date heading, or a block under it.
+/// What a column row is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kind {
+    Heading,
+    Block,
+    Placeholder,
+    AgendaHeader,
+    AgendaRow,
+}
+
+/// One row of the column: a date heading, a block under it, or a row of the agenda.
 #[derive(Clone)]
 struct Row {
-    heading: bool,
+    kind: Kind,
     date: String,
     block_id: i32,
     depth: u32,
     text: String,
-    placeholder: bool,
+    marker: Option<Marker>,
+    scheduled: Option<String>,
+    source: String,
+    overdue: bool,
+}
+
+impl Row {
+    fn is_heading(&self) -> bool {
+        self.kind == Kind::Heading || self.kind == Kind::AgendaHeader
+    }
+
+    fn is_editable_block(&self) -> bool {
+        self.kind == Kind::Block || self.kind == Kind::Placeholder
+    }
 }
 
 #[derive(Default)]
@@ -158,6 +200,9 @@ enum Command {
     Indent { block_id: i32 },
     Outdent { block_id: i32 },
     Delete { block_id: i32 },
+    CycleMarker { block_id: i32 },
+    SetMarker { block_id: i32, marker: Option<Marker> },
+    SetScheduled { block_id: i32, date: Option<String> },
     Undo,
     Redo,
 }
@@ -184,6 +229,7 @@ enum Job {
 struct Outcome {
     error: Option<String>,
     days: Vec<(String, Vec<BlockRow>)>,
+    agenda: Vec<AgendaRow>,
     ready: bool,
     can_undo: bool,
     can_redo: bool,
@@ -200,10 +246,10 @@ impl JournalRust {
     /// The block id at `row`, ignoring headings and un-materialised placeholders.
     fn block_at(&self, row: i32) -> Option<i32> {
         let row = self.rows.get(row as usize)?;
-        if row.heading || row.placeholder {
-            None
-        } else {
+        if row.is_editable_block() || row.kind == Kind::AgendaRow {
             Some(row.block_id)
+        } else {
+            None
         }
     }
 }
@@ -220,12 +266,12 @@ impl qobject::Journal {
         };
         match role {
             Role::Kind => {
-                let kind = if row.heading {
-                    "heading"
-                } else if row.placeholder {
-                    "placeholder"
-                } else {
-                    "block"
+                let kind = match row.kind {
+                    Kind::Heading => "heading",
+                    Kind::Block => "block",
+                    Kind::Placeholder => "placeholder",
+                    Kind::AgendaHeader => "agenda-header",
+                    Kind::AgendaRow => "agenda-row",
                 };
                 QVariant::from(&QString::from(kind))
             }
@@ -233,7 +279,15 @@ impl qobject::Journal {
             Role::Depth => QVariant::from(&(row.depth as i32)),
             Role::Date => QVariant::from(&QString::from(row.date.as_str())),
             Role::BlockId => QVariant::from(&row.block_id),
-            Role::Placeholder => QVariant::from(&row.placeholder),
+            Role::Placeholder => QVariant::from(&(row.kind == Kind::Placeholder)),
+            Role::Marker => QVariant::from(&QString::from(
+                row.marker.map(Marker::label).unwrap_or(""),
+            )),
+            Role::Scheduled => QVariant::from(&QString::from(
+                row.scheduled.as_deref().unwrap_or(""),
+            )),
+            Role::Source => QVariant::from(&QString::from(row.source.as_str())),
+            Role::Overdue => QVariant::from(&row.overdue),
             _ => QVariant::default(),
         }
     }
@@ -246,6 +300,10 @@ impl qobject::Journal {
         hash.insert(Role::Date.repr, QByteArray::from("date"));
         hash.insert(Role::BlockId.repr, QByteArray::from("blockId"));
         hash.insert(Role::Placeholder.repr, QByteArray::from("placeholder"));
+        hash.insert(Role::Marker.repr, QByteArray::from("marker"));
+        hash.insert(Role::Scheduled.repr, QByteArray::from("scheduled"));
+        hash.insert(Role::Source.repr, QByteArray::from("source"));
+        hash.insert(Role::Overdue.repr, QByteArray::from("overdue"));
         hash
     }
 
@@ -291,12 +349,12 @@ impl qobject::Journal {
         let Some(target) = self.rows.get(row as usize).cloned() else {
             return;
         };
-        let command = if target.placeholder {
+        let command = if target.kind == Kind::Placeholder {
             Command::Materialize {
                 date: target.date,
                 text: text.to_string(),
             }
-        } else if target.heading {
+        } else if !target.is_editable_block() {
             return;
         } else {
             Command::Update {
@@ -307,14 +365,14 @@ impl qobject::Journal {
         self.as_mut().dispatch(Some(command));
     }
 
-    fn save_now(mut self: Pin<&mut Self>, row: i32, text: &QString) {
+    fn save_now(self: Pin<&mut Self>, row: i32, text: &QString) {
         let Some(target) = self.rows.get(row as usize).cloned() else {
             return;
         };
-        if target.heading {
+        if !target.is_editable_block() {
             return;
         }
-        let command = if target.placeholder {
+        let command = if target.kind == Kind::Placeholder {
             Command::Materialize {
                 date: target.date,
                 text: text.to_string(),
@@ -336,7 +394,7 @@ impl qobject::Journal {
         let Some(target) = self.rows.get(row as usize).cloned() else {
             return;
         };
-        if target.heading {
+        if !target.is_editable_block() {
             return;
         }
         let command = Command::Submit {
@@ -363,6 +421,34 @@ impl qobject::Journal {
     fn remove(mut self: Pin<&mut Self>, row: i32) {
         if let Some(block_id) = self.block_at(row) {
             self.as_mut().dispatch(Some(Command::Delete { block_id }));
+        }
+    }
+
+    fn cycle_marker(mut self: Pin<&mut Self>, row: i32) {
+        if let Some(block_id) = self.block_at(row) {
+            self.as_mut().dispatch(Some(Command::CycleMarker { block_id }));
+        }
+    }
+
+    fn set_marker(mut self: Pin<&mut Self>, row: i32, marker: &QString) {
+        if let Some(block_id) = self.block_at(row) {
+            let marker = match marker.to_string().as_str() {
+                "TODO" => Some(Marker::Todo),
+                "DOING" => Some(Marker::Doing),
+                "DONE" => Some(Marker::Done),
+                _ => None,
+            };
+            self.as_mut()
+                .dispatch(Some(Command::SetMarker { block_id, marker }));
+        }
+    }
+
+    fn set_scheduled(mut self: Pin<&mut Self>, row: i32, date: &QString) {
+        if let Some(block_id) = self.block_at(row) {
+            let date = date.to_string();
+            let date = if date.is_empty() { None } else { Some(date) };
+            self.as_mut()
+                .dispatch(Some(Command::SetScheduled { block_id, date }));
         }
     }
 
@@ -398,12 +484,21 @@ impl qobject::Journal {
 
         self.as_mut().begin_reset_model();
         {
+            let agenda = agenda_rows(&outcome.agenda);
+            let mut rows = Vec::new();
+            for (index, (date, blocks)) in outcome.days.iter().enumerate() {
+                if index == 1 && !agenda.is_empty() {
+                    // "Right under today's blocks": today is the newest day in the column.
+                    rows.extend(agenda.iter().cloned());
+                }
+                rows.extend(day_rows(date, blocks));
+            }
+            if rows.is_empty() {
+                rows.extend(agenda.iter().cloned());
+            }
+
             let mut rust = self.as_mut().rust_mut();
-            rust.rows = outcome
-                .days
-                .iter()
-                .flat_map(|(date, blocks)| day_rows(date, blocks))
-                .collect();
+            rust.rows = rows;
             rust.can_undo = outcome.can_undo;
             rust.can_redo = outcome.can_redo;
         }
@@ -444,6 +539,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         Outcome {
                             error: Some(error),
                             days: Vec::new(),
+                            agenda: Vec::new(),
                             ready: false,
                             can_undo: false,
                             can_redo: false,
@@ -474,6 +570,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     Err(error) => Outcome {
                         error: Some(error),
                         days: Vec::new(),
+                        agenda: Vec::new(),
                         ready: true,
                         can_undo: store.can_undo(),
                         can_redo: store.can_redo(),
@@ -529,6 +626,13 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
         Command::Indent { block_id } => store.indent(block_id as i64).map_err(fail),
         Command::Outdent { block_id } => store.outdent(block_id as i64).map_err(fail),
         Command::Delete { block_id } => store.delete_block(block_id as i64).map_err(fail),
+        Command::CycleMarker { block_id } => store.cycle_marker(block_id as i64).map_err(fail),
+        Command::SetMarker { block_id, marker } => store
+            .set_marker(block_id as i64, marker)
+            .map_err(fail),
+        Command::SetScheduled { block_id, date } => store
+            .set_scheduled(block_id as i64, date.as_deref())
+            .map_err(fail),
         Command::Undo => store.undo().map(|_| ()).map_err(fail),
         Command::Redo => store.redo().map(|_| ()).map_err(fail),
     }
@@ -543,46 +647,98 @@ fn snapshot(store: &Store, dates: &[String]) -> Outcome {
         })
         .collect();
 
+    // The agenda is anchored to the newest day in the column, which is today's page.
+    let agenda = dates
+        .first()
+        .and_then(|today| store.agenda(today, AGENDA_HORIZON_DAYS).ok())
+        .unwrap_or_default();
+
     Outcome {
         error: None,
         days,
+        agenda,
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
     }
 }
 
-fn day_rows(date: &str, blocks: &[BlockRow]) -> Vec<Row> {
-    let mut rows = vec![Row {
-        heading: true,
+fn heading(date: &str) -> Row {
+    Row {
+        kind: Kind::Heading,
         date: date.to_string(),
         block_id: -1,
         depth: 0,
         text: String::new(),
-        placeholder: false,
-    }];
+        marker: None,
+        scheduled: None,
+        source: String::new(),
+        overdue: false,
+    }
+}
+
+fn day_rows(date: &str, blocks: &[BlockRow]) -> Vec<Row> {
+    let mut rows = vec![heading(date)];
 
     if blocks.is_empty() {
         // The empty block the cursor lands in. It is never persisted: the first keystroke
         // materialises it, so scrolling a year back cannot fill the database with empty days.
         rows.push(Row {
-            heading: false,
-            date: date.to_string(),
-            block_id: -1,
-            depth: 0,
-            text: String::new(),
-            placeholder: true,
+            kind: Kind::Placeholder,
+            marker: None,
+            scheduled: None,
+            source: String::new(),
+            overdue: false,
+            ..heading(date)
         });
         return rows;
     }
 
     rows.extend(blocks.iter().map(|block| Row {
-        heading: false,
+        kind: Kind::Block,
         date: date.to_string(),
         block_id: block.id as i32,
         depth: block.depth,
         text: block.content.clone(),
-        placeholder: false,
+        marker: block.marker,
+        scheduled: block.scheduled_date.clone(),
+        source: String::new(),
+        overdue: false,
+    }));
+    rows
+}
+
+/// The scheduled section that sits directly under today's blocks. Absent entirely when nothing is due.
+fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
+    if agenda.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rows = vec![Row {
+        kind: Kind::AgendaHeader,
+        date: String::new(),
+        block_id: -1,
+        depth: 0,
+        text: "Scheduled".to_string(),
+        marker: None,
+        scheduled: None,
+        source: String::new(),
+        overdue: false,
+    }];
+
+    rows.extend(agenda.iter().map(|entry| Row {
+        kind: Kind::AgendaRow,
+        date: entry.block.scheduled_date.clone().unwrap_or_default(),
+        block_id: entry.block.id as i32,
+        depth: 0,
+        text: entry.block.content.clone(),
+        marker: entry.block.marker,
+        scheduled: entry.block.scheduled_date.clone(),
+        source: entry
+            .journal_date
+            .clone()
+            .unwrap_or_else(|| entry.page_name.clone()),
+        overdue: entry.overdue,
     }));
     rows
 }
@@ -635,10 +791,9 @@ mod tests {
         let rows = day_rows("2026-04-13", &[]);
 
         assert_eq!(rows.len(), 2);
-        assert!(rows[0].heading);
+        assert_eq!(rows[0].kind, Kind::Heading);
         assert_eq!(rows[0].date, "2026-04-13");
-        assert!(!rows[1].heading);
-        assert!(rows[1].placeholder);
+        assert_eq!(rows[1].kind, Kind::Placeholder);
         assert_eq!(rows[1].block_id, -1, "the placeholder is never a real row");
     }
 
@@ -647,10 +802,35 @@ mod tests {
         let rows = day_rows("2026-04-13", &[block(7, 0, "one"), block(8, 1, "two")]);
 
         assert_eq!(rows.len(), 3);
-        assert!(rows[0].heading);
+        assert_eq!(rows[0].kind, Kind::Heading);
         assert_eq!((rows[1].block_id, rows[1].depth), (7, 0));
         assert_eq!((rows[2].block_id, rows[2].depth), (8, 1));
-        assert!(rows[1..].iter().all(|row| !row.placeholder && !row.heading));
+        assert!(rows[1..].iter().all(|row| row.kind == Kind::Block));
+    }
+
+    #[test]
+    fn an_agenda_renders_a_section_heading_and_its_rows() {
+        let agenda = vec![lognotes_core::AgendaRow {
+            block: block(9, 0, "pay the bill"),
+            page_name: "2026-04-11".to_string(),
+            journal_date: Some("2026-04-11".to_string()),
+            overdue: true,
+        }];
+
+        let rows = agenda_rows(&agenda);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, Kind::AgendaHeader);
+        assert_eq!(rows[0].text, "Scheduled");
+        assert_eq!(rows[1].kind, Kind::AgendaRow);
+        assert_eq!(rows[1].block_id, 9);
+        assert!(rows[1].overdue);
+        assert_eq!(rows[1].source, "2026-04-11");
+    }
+
+    #[test]
+    fn nothing_scheduled_means_no_section_at_all() {
+        assert!(agenda_rows(&[]).is_empty());
     }
 
     #[test]

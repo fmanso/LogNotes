@@ -47,7 +47,6 @@ ApplicationWindow {
 
     Component.onCompleted: journal.start()
 
-
     // The app opens ready to type: today's empty block has the caret before the first keystroke.
     // `revision` fires on every applied snapshot, which `countChanged` cannot do — editing a block
     // leaves the row count untouched.
@@ -75,16 +74,6 @@ ApplicationWindow {
         }
     }
 
-    function firstBlockRow() {
-        for (let i = 0; i < list.count; i++) {
-            const item = list.itemAtIndex(i)
-            if (item && item.isBlock) {
-                return i
-            }
-        }
-        return 1
-    }
-
     Shortcut {
         sequences: ["Ctrl+Z"]
         onActivated: {
@@ -99,6 +88,16 @@ ApplicationWindow {
             root.rebuilding = true
             journal.redo()
         }
+    }
+
+    function firstBlockRow() {
+        for (let i = 0; i < list.count; i++) {
+            const item = list.itemAtIndex(i)
+            if (item && item.isBlock) {
+                return i
+            }
+        }
+        return 1
     }
 
     function focusBlock(row) {
@@ -132,6 +131,152 @@ ApplicationWindow {
         onTriggered: root.focusBlock(root.focusRow)
     }
 
+    function markerColour(marker) {
+        if (marker === "TODO") return "#b07d3a"
+        if (marker === "DOING") return "#3a6ea5"
+        if (marker === "DONE") return "#4a7c59"
+        return "#e4e0d8"
+    }
+
+    function formatDay(iso) {
+        if (!iso) return ""
+        return Qt.formatDate(new Date(iso + "T12:00:00"), "MMM d")
+    }
+
+    // Picking a date is one popup, one decision, Esc always backs out. Qt 6.12 ships Controls'
+    // `Calendar` as a singleton that cannot be instantiated, so this is built from MonthGrid.
+    Popup {
+        id: datePopup
+        property int row: -1
+        property date monthAnchor: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+        property date picked: new Date()
+
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        focus: true
+        padding: 12
+
+        function openFor(rowIndex) {
+            row = rowIndex
+            picked = new Date()
+            monthAnchor = new Date(picked.getFullYear(), picked.getMonth(), 1)
+            open()
+        }
+
+        function shift(days) {
+            picked = new Date(picked.getTime() + days * 86400000)
+            monthAnchor = new Date(picked.getFullYear(), picked.getMonth(), 1)
+        }
+
+        function accept() {
+            if (row >= 0) {
+                root.rebuilding = true
+                journal.set_scheduled(row, Qt.formatDate(picked, "yyyy-MM-dd"))
+            }
+            close()
+        }
+
+        onOpened: popupContent.forceActiveFocus()
+
+        Column {
+            id: popupContent
+            focus: true
+            spacing: 8
+
+            Keys.onPressed: (event) => {
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    datePopup.accept()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
+                    datePopup.close()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Left) {
+                    datePopup.shift(-1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Right) {
+                    datePopup.shift(1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Up) {
+                    datePopup.shift(-7)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Down) {
+                    datePopup.shift(7)
+                    event.accepted = true
+                }
+            }
+
+            Row {
+                spacing: 6
+
+                Button {
+                    text: "\u2039"
+                    onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
+                                                              datePopup.monthAnchor.getMonth() - 1, 1)
+                }
+
+                Label {
+                    text: Qt.formatDate(datePopup.monthAnchor, "MMMM yyyy")
+                    width: 150
+                    horizontalAlignment: Text.AlignHCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "#242424"
+                }
+
+                Button {
+                    text: "\u203a"
+                    onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
+                                                              datePopup.monthAnchor.getMonth() + 1, 1)
+                }
+            }
+
+            DayOfWeekRow {
+                locale: grid.locale
+            }
+
+            MonthGrid {
+                id: grid
+                month: datePopup.monthAnchor
+                onClicked: (date) => datePopup.picked = date
+            }
+
+            Label {
+                text: qsTr("Picked: %1").arg(Qt.formatDate(datePopup.picked, "ddd, MMM d"))
+                color: "#5b5b5b"
+                font.pixelSize: 12
+            }
+
+            Row {
+                spacing: 8
+                anchors.right: parent.right
+
+                Button {
+                    text: qsTr("Clear")
+                    onClicked: {
+                        root.rebuilding = true
+                        journal.set_scheduled(datePopup.row, "")
+                        datePopup.close()
+                    }
+                }
+
+                Button {
+                    text: qsTr("Today")
+                    onClicked: {
+                        datePopup.picked = new Date()
+                        datePopup.monthAnchor = new Date(datePopup.picked.getFullYear(),
+                                                         datePopup.picked.getMonth(), 1)
+                    }
+                }
+
+                Button {
+                    text: qsTr("OK")
+                    onClicked: datePopup.accept()
+                }
+            }
+        }
+
+    }
+
     ListView {
         id: list
         anchors.fill: parent
@@ -155,60 +300,123 @@ ApplicationWindow {
         delegate: Item {
             id: rowItem
             width: list.width
-            height: kind === "heading" ? heading.implicitHeight + 22 : Math.max(blockRow.implicitHeight, 24)
+            height: rowItem.isHeading
+                    ? sectionHeading.implicitHeight + 22
+                    : Math.max(blockRow.implicitHeight, 24)
 
             property alias blockEditor: editor
-            property bool isBlock: kind !== "heading"
-            property bool isHeading: kind === "heading"
+            property bool isBlock: kind === "block" || kind === "placeholder"
+            property bool isHeading: kind === "heading" || kind === "agenda-header"
+            property bool isAgenda: kind === "agenda-row"
+            property bool hovered: false
 
+            HoverHandler {
+                onHoveredChanged: rowItem.hovered = hovered
+            }
+
+            // A date heading, or the "Scheduled" section heading.
             Label {
-                id: heading
-                visible: kind === "heading"
+                id: sectionHeading
+                visible: rowItem.isHeading
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 4
                 text: kind === "heading"
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
-                      : ""
-                font.pixelSize: 15
-                font.bold: true
+                      : model.text
                 color: "#5b5b5b"
+                font.pixelSize: kind === "heading" ? 15 : 13
+                font.bold: true
+                font.capitalization: kind === "heading" ? Font.MixedCase : Font.AllUppercase
             }
 
-            Row {
+            // Anchored layout rather than a Row: an editor whose width is computed from its own
+            // x inside a Row is a binding loop, and Qt resolves it by collapsing the width to 0.
+            Item {
                 id: blockRow
-                visible: kind !== "heading"
-                anchors.top: parent.top
+                visible: !rowItem.isHeading
                 width: parent.width
-                height: Math.max(editor.implicitHeight, 24)
+                height: Math.max(editor.visible ? editor.implicitHeight : 0, 24)
 
                 Item {
+                    id: indentSpacer
                     width: model.depth * 24
                     height: 1
                 }
 
+                // The marker box is both the affordance and the state.
                 Rectangle {
-                    width: 5
-                    height: 5
-                    radius: 2.5
-                    color: "#c9c4bb"
+                    id: markerBox
+                    objectName: rowItem.isAgenda ? "agendaCheck" : "blockCheck"
+                    // Only worth drawing when it says something, or when the pointer is near it.
+                    visible: model.marker !== "" || rowItem.hovered || editor.activeFocus
+                    x: indentSpacer.width + 4
+                    width: 14
+                    height: 14
+                    radius: 3
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.verticalCenterOffset: 2
+                    color: model.marker === "" ? "transparent" : root.markerColour(model.marker)
+                    border.color: root.markerColour(model.marker)
+                    border.width: 1
+
+                    Label {
+                        anchors.centerIn: parent
+                        visible: model.marker === "DONE"
+                        text: "\u2713"
+                        color: "#ffffff"
+                        font.pixelSize: 10
+                        font.bold: true
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onClicked: {
+                            root.rebuilding = true
+                            if (rowItem.isAgenda) {
+                                // Checking something off means "done", not "next marker along".
+                                journal.set_marker(index, "DONE")
+                            } else {
+                                journal.cycle_marker(index)
+                            }
+                        }
+                    }
                 }
 
-                Item {
-                    width: 14
-                    height: 1
+                Label {
+                    id: markerLabel
+                    x: markerBox.x + markerBox.width + 4
+                    visible: model.marker !== ""
+                    text: model.marker
+                    color: root.markerColour(model.marker)
+                    font.pixelSize: 11
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Label {
+                    id: scheduledChip
+                    visible: !rowItem.isAgenda && model.scheduled !== ""
+                    text: formatDay(model.scheduled)
+                    color: model.overdue ? "#a4443c" : "#8a857c"
+                    font.pixelSize: 12
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 TextEdit {
                     id: editor
                     objectName: "blockEditor"
-                    width: blockRow.width - x - 8
+                    visible: rowItem.isBlock
+                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.leftMargin: 8
+                    anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
+                    anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.text
-                    color: "#242424"
+                    color: model.marker === "DONE" ? "#8a857c" : "#242424"
                     font.pixelSize: 16
+                    font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
                     activeFocusOnPress: true
@@ -248,12 +456,21 @@ ApplicationWindow {
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
-                            // The new block is the next row; the caret follows it.
-                            root.focusRow = index + 1
-                            root.focusCursor = 0
-                            root.wantsFocus = true
                             root.rebuilding = true
-                            journal.submit_block(index, cursorPosition, text)
+                            if (event.modifiers & Qt.ControlModifier) {
+                                // Ctrl+Enter marks the block; plain Enter splits it.
+                                journal.cycle_marker(index)
+                            } else {
+                                root.focusRow = index + 1
+                                root.focusCursor = 0
+                                root.wantsFocus = true
+                                journal.submit_block(index, cursorPosition, text)
+                            }
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_S
+                                   && (event.modifiers & Qt.ControlModifier)
+                                   && (event.modifiers & Qt.ShiftModifier)) {
+                            datePopup.openFor(index)
                             event.accepted = true
                         } else if (event.key === Qt.Key_Tab) {
                             debounce.stop()
@@ -300,6 +517,41 @@ ApplicationWindow {
                             event.accepted = true
                         }
                     }
+                }
+
+                // An agenda row is the same block seen from today: read it, or check it off here.
+                Label {
+                    id: agendaText
+                    visible: rowItem.isAgenda
+                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.leftMargin: 8
+                    anchors.right: sourceLabel.left
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: model.text === "" ? qsTr("(empty block)") : model.text
+                    color: model.overdue ? "#a4443c" : "#242424"
+                    font.pixelSize: 16
+                    elide: Text.ElideRight
+                }
+
+                Label {
+                    id: sourceLabel
+                    visible: rowItem.isAgenda
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: {
+                        if (!rowItem.isAgenda) {
+                            return ""
+                        }
+                        const day = formatDay(model.scheduled)
+                        const isDate = /^\d{4}-\d{2}-\d{2}$/.test(model.source)
+                        if (model.source === "" || model.source === model.scheduled) {
+                            return day
+                        }
+                        return day + " · from " + (isDate ? formatDay(model.source) : model.source)
+                    }
+                    color: model.overdue ? "#a4443c" : "#8a857c"
+                    font.pixelSize: 12
                 }
             }
         }

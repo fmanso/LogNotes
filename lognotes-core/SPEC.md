@@ -96,8 +96,9 @@ ever visible.
 | `insert_block(page, after, content)` | New block as the next sibling of `after` (or last child), with a key between its neighbours. |
 | `update_content(block, content)` | Re-extracts links and reindexes text. |
 | `split_block(block, offset)` | One command for Enter mid-block: keeps the text before `offset`, moves the rest into a new sibling. Splitting and inserting separately would show up as two undo steps. |
-| `set_marker(block, marker)` | Sets or clears the task marker; cycling order is a view concern. |
-| `set_scheduled(block, date)` | Sets or clears the scheduled date. |
+| `cycle_marker(block)` | Walks the marker cycle none → TODO → DOING → DONE → none. It lives here, not in the view, so a checkbox, a shortcut and the agenda cannot disagree about the order. |
+| `set_marker(block, marker)` | Sets or clears the marker directly — what the agenda's checkbox uses to mean "done", as opposed to "next marker along". |
+| `set_scheduled(block, date)` | Sets or clears the scheduled date. Scheduling a block that is not a task also marks it TODO, in the same composite action, because the agenda lists tasks and a date on an untasked block would silently never appear. |
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
 | `move(block, page, after)` | Moves a block (with its subtree) between pages or positions. |
 | `delete_block(block)` | Removes the block and its subtree. |
@@ -116,7 +117,7 @@ cursor is worse than one that lingers.
 | `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
-| `agenda(today, horizon_days = 7)` | Blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key, each carrying its owning page's name. |
+| `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
 | `references(page)` | Explicit references from `block_link`, plus plain mentions from `block_fts` matched on `name_key` as whole words and excluding blocks already listed. |
 
 The agenda rule and its unconfirmed parts are recorded in `lognotes`; this module implements them and
@@ -167,6 +168,10 @@ once with one undo, including its order keys; `split_block` is one history entry
 inside a character; undo crosses days in the order the edits were made; a no-op command records no history;
 reading a day never creates it; journal pages are unique per date; malformed dates are refused.
 
+Also covered from the task capability: the marker cycle in order; agenda boundaries at `today`, `today + 7`
+and `today + 8`; overdue rows flagged and sorted first; a `DONE` block leaving the agenda; scheduling an
+untasked block marking it TODO; clearing a date keeping the marker; and one undo removing both the date and
+the auto-marker.
+
 Not yet covered, and owed by the capabilities that introduce them: restoring a moved subtree across pages
-keeps `block_link` and `block_fts` consistent; agenda boundaries at `today`, `today + 7`, `today + 8`, and
-an overdue item; a `DONE` block dropping out of the agenda; a plain mention appearing once in `references`.
+keeping `block_link` and `block_fts` consistent, and a plain mention appearing once in `references`.

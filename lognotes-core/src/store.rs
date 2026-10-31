@@ -10,7 +10,7 @@ use chrono::{Days, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Error, Result};
-use crate::model::{BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind};
+use crate::model::{AgendaRow, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind};
 use crate::order::key_between;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -77,6 +77,14 @@ enum Action {
         block_id: i64,
         parent_id: Option<i64>,
         order_key: String,
+    },
+    SetMarker {
+        block_id: i64,
+        marker: Option<Marker>,
+    },
+    SetScheduled {
+        block_id: i64,
+        date: Option<String>,
     },
     Composite(Vec<Action>),
 }
@@ -309,6 +317,111 @@ impl Store {
         })
     }
 
+    /// Walk the marker cycle: none → TODO → DOING → DONE → none.
+    pub fn cycle_marker(&mut self, block_id: i64) -> Result<()> {
+        let current = block_record(&self.conn, block_id)?.marker;
+        let next = match current {
+            Some(marker) => marker.next(),
+            None => Some(Marker::first()),
+        };
+        self.exec(Action::SetMarker {
+            block_id,
+            marker: next,
+        })
+    }
+
+    /// Set or clear a block's marker directly.
+    pub fn set_marker(&mut self, block_id: i64, marker: Option<Marker>) -> Result<()> {
+        self.exec(Action::SetMarker { block_id, marker })
+    }
+
+    /// Schedule a block for `date`, or clear the date with `None`.
+    ///
+    /// Scheduling a block that is not a task also marks it TODO: the agenda lists tasks, so a date on an
+    /// untasked block would silently never appear. Both writes are one action, so one undo steps back over
+    /// the whole thing.
+    pub fn set_scheduled(&mut self, block_id: i64, date: Option<&str>) -> Result<()> {
+        if let Some(date) = date {
+            ensure_date(date)?;
+        }
+        let record = block_record(&self.conn, block_id)?;
+
+        let mut actions = vec![Action::SetScheduled {
+            block_id,
+            date: date.map(str::to_string),
+        }];
+        if date.is_some() && record.marker.is_none() {
+            actions.push(Action::SetMarker {
+                block_id,
+                marker: Some(Marker::first()),
+            });
+        }
+
+        if actions.len() == 1 {
+            self.exec(actions.remove(0))
+        } else {
+            self.exec(Action::Composite(actions))
+        }
+    }
+
+    /// Everything due: marked `TODO`/`DOING`, with a date up to `horizon_days` ahead. Past dates stay,
+    /// flagged overdue, until the block is marked `DONE`.
+    pub fn agenda(&self, today: &str, horizon_days: u32) -> Result<Vec<AgendaRow>> {
+        let today_date = ensure_date(today)?;
+        let horizon = today_date
+            .checked_add_days(Days::new(horizon_days as u64))
+            .ok_or_else(|| Error::BadDate(today.to_string()))?
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.parent_id, b.order_key, b.content, b.marker, b.scheduled_date, b.collapsed,
+                    p.name, p.journal_date
+             FROM block b JOIN page p ON p.id = b.page_id
+             WHERE b.marker IN ('TODO', 'DOING')
+               AND b.scheduled_date IS NOT NULL
+               AND b.scheduled_date <= ?1
+             ORDER BY b.scheduled_date, p.id, b.order_key",
+        )?;
+
+        let rows = stmt
+            .query_map([horizon], |row| {
+                let scheduled: Option<String> = row.get(5)?;
+                Ok((
+                    BlockRow {
+                        id: row.get(0)?,
+                        parent_id: row.get(1)?,
+                        depth: 0,
+                        order_key: row.get(2)?,
+                        content: row.get(3)?,
+                        marker: row.get::<_, Option<String>>(4)?.as_deref().and_then(Marker::parse),
+                        scheduled_date: scheduled.clone(),
+                        collapsed: row.get(6)?,
+                    },
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(block, page_name, journal_date)| {
+                let overdue = block
+                    .scheduled_date
+                    .as_ref()
+                    .map(|date| date.as_str() < today)
+                    .unwrap_or(false);
+                AgendaRow {
+                    block,
+                    page_name,
+                    journal_date,
+                    overdue,
+                }
+            })
+            .collect())
+    }
+
     /// Delete a block and everything under it. One undo step restores the whole subtree.
     pub fn delete_block(&mut self, block_id: i64) -> Result<()> {
         self.exec(Action::Delete { block_id })
@@ -521,6 +634,40 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
                 block_id: *block_id,
                 parent_id: old_parent,
                 order_key: old_key,
+            })
+        }
+        Action::SetMarker { block_id, marker } => {
+            let old: Option<String> = conn
+                .query_row("SELECT marker FROM block WHERE id = ?1", [block_id], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .ok_or(Error::NotFound(*block_id))?;
+            conn.execute(
+                "UPDATE block SET marker = ?2, updated_at = ?3 WHERE id = ?1",
+                params![block_id, marker.map(Marker::as_str), now()],
+            )?;
+            Ok(Action::SetMarker {
+                block_id: *block_id,
+                marker: old.as_deref().and_then(Marker::parse),
+            })
+        }
+        Action::SetScheduled { block_id, date } => {
+            let old: Option<String> = conn
+                .query_row(
+                    "SELECT scheduled_date FROM block WHERE id = ?1",
+                    [block_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(Error::NotFound(*block_id))?;
+            conn.execute(
+                "UPDATE block SET scheduled_date = ?2, updated_at = ?3 WHERE id = ?1",
+                params![block_id, date, now()],
+            )?;
+            Ok(Action::SetScheduled {
+                block_id: *block_id,
+                date: old,
             })
         }
         Action::Composite(actions) => {

@@ -42,6 +42,34 @@ impl Marker {
             _ => None,
         }
     }
+
+    /// The cycle the user gets from Ctrl+Enter and from clicking the box: none → TODO → DOING → DONE →
+    /// none. It lives here so the checkbox, the shortcut and the agenda cannot drift apart.
+    pub fn next(self) -> Option<Marker> {
+        match self {
+            Marker::Todo => Some(Marker::Doing),
+            Marker::Doing => Some(Marker::Done),
+            Marker::Done => None,
+        }
+    }
+
+    /// The marker a block with none gets on the first press.
+    pub fn first() -> Marker {
+        Marker::Todo
+    }
+
+    pub fn label(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// One row of the agenda: the block that is due, where it lives, and whether its date has passed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgendaRow {
+    pub block: BlockRow,
+    pub page_name: String,
+    pub journal_date: Option<String>,
+    pub overdue: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

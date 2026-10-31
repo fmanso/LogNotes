@@ -11,6 +11,6 @@ mod order;
 mod store;
 
 pub use error::{Error, Result};
-pub use model::{BlockRow, JournalDay, Marker, Page, PageKind};
+pub use model::{AgendaRow, BlockRow, JournalDay, Marker, Page, PageKind};
 pub use order::key_between;
 pub use store::Store;

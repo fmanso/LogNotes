@@ -145,6 +145,58 @@ QString lognotes_editor_text(int index) {
     return editors.at(index)->property("text").toString();
 }
 
+QString lognotes_editor_debug(int index) {
+    const auto editors = block_editors();
+    if (index < 0 || index >= editors.size()) {
+        return QStringLiteral("<none>");
+    }
+    auto* item = editors.at(index);
+    const QPointF scene = item->mapToScene(QPointF(0, 0));
+    return QStringLiteral("%1 w=%2 h=%3 at(%4,%5) visible=%6")
+        .arg(item->property("text").toString())
+        .arg(item->width())
+        .arg(item->height())
+        .arg(scene.x())
+        .arg(scene.y())
+        .arg(item->isVisible());
+}
+
+namespace {
+void collect_named(QQuickItem* item, const QString& name, QList<QQuickItem*>& out) {
+    if (!item) {
+        return;
+    }
+    if (item->objectName() == name && item->isVisible()) {
+        out.append(item);
+    }
+    for (auto* child : item->childItems()) {
+        collect_named(child, name, out);
+    }
+}
+} // namespace
+
+bool lognotes_click_named(const QString& name, int index) {
+    auto* w = window();
+    if (!w) {
+        return false;
+    }
+    QList<QQuickItem*> matches;
+    collect_named(w->contentItem(), name, matches);
+    if (index < 0 || index >= matches.size()) {
+        return false;
+    }
+    auto* item = matches.at(index);
+    const QPointF centre = item->mapToScene(QPointF(item->width() / 2.0, item->height() / 2.0));
+    const QPointF global = w->mapToGlobal(centre.toPoint());
+    QMouseEvent press(QEvent::MouseButtonPress, centre, global, Qt::LeftButton, Qt::LeftButton,
+                      Qt::NoModifier);
+    QCoreApplication::sendEvent(w, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, centre, global, Qt::LeftButton, Qt::NoButton,
+                        Qt::NoModifier);
+    QCoreApplication::sendEvent(w, &release);
+    return true;
+}
+
 bool lognotes_scroll(int angle_delta) {
     auto* w = window();
     if (!w) {

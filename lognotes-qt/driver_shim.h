@@ -37,6 +37,11 @@ bool lognotes_click_block(int index);
 // Text currently shown in the index-th visible block editor, or empty if there is none.
 QString lognotes_editor_text(int index);
 
+QString lognotes_editor_debug(int index);
+
+// Clicks the centre of the index-th visible item with this objectName.
+bool lognotes_click_named(const QString& name, int index);
+
 // Scrolls the column by `angle_delta` wheel units; negative scrolls into the past.
 bool lognotes_scroll(int angle_delta);
 
