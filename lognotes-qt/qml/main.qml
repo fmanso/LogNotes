@@ -5,6 +5,7 @@ import com.lognotes.app 1.0
 
 ApplicationWindow {
     id: root
+    objectName: "mainWindow"
     width: 820
     height: 900
     visible: true
@@ -184,6 +185,7 @@ ApplicationWindow {
 
                 TextEdit {
                     id: editor
+                    objectName: "blockEditor"
                     width: blockRow.width - x - 8
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.text
@@ -253,6 +255,20 @@ ApplicationWindow {
                             if (!model.placeholder) {
                                 root.rebuilding = true
                                 journal.remove(index)
+                            }
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Z && (event.modifiers & Qt.ControlModifier)) {
+                            // TextEdit would swallow Ctrl+Z for its own per-widget undo, which knows
+                            // nothing about block creation, indentation, or other days.
+                            debounce.stop()
+                            root.rebuilding = true
+                            if (text !== model.text) {
+                                journal.edit(index, text)
+                            }
+                            if (event.modifiers & Qt.ShiftModifier) {
+                                journal.redo()
+                            } else {
+                                journal.undo()
                             }
                             event.accepted = true
                         } else if (event.key === Qt.Key_Up) {

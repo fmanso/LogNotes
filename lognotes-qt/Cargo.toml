@@ -14,3 +14,7 @@ lognotes-core = { path = "../lognotes-core" }
 
 [build-dependencies]
 cxx-qt-build = "0.10"
+
+[features]
+# Development-only: lets tests press real keys and grab the window. Off for the shipped app.
+driver = []

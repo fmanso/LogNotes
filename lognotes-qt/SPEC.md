@@ -58,6 +58,10 @@ list by `CHUNK_DAYS` (14) and asks for a snapshot of the larger window.
 
 ## View behaviour worth knowing
 
+- **Ctrl+Z has to be handled in the delegate.** `TextEdit` swallows it for its own per-widget undo, which
+  knows nothing about block creation, indentation, or other days, so the delegate's `Keys` handler claims
+  it first, flushes any unsaved text, then calls the model's undo/redo. The window-level `Shortcut`s only
+  cover the case where focus sits outside a block.
 - **cxx-qt does not camelCase Rust identifiers for QML.** `submit_block` is `submit_block` in QML, not
   `submitBlock`. A mismatch compiles and fails only when the key is pressed, so a unit test scans the
   QML for `journal.<name>(` calls and asserts each is a declared `#[qinvokable]`.
@@ -91,3 +95,20 @@ broken database can never look like an empty journal.
   rebuild can land the caret one row off.
 - `cursorPosition` from QML is a UTF-16 offset while the core splits at UTF-8 byte boundaries; they agree
   for BMP text and diverge for characters outside it (emoji), where a split lands on the nearest boundary.
+
+## Live testing
+
+The window can be driven without a person at the keyboard, which is how its input handling gets checked:
+
+```
+cargo run -p lognotes-qt --features driver -- --livetest
+```
+
+It writes to a throwaway database under `$TMPDIR/lognotes-livetest`, loads the same `main.qml` the app
+loads, and types real `QKeyEvent`s into the focused item: type, Enter, Tab, Shift+Tab, Ctrl+Z — checking
+the stored rows and depths after each step. It also saves a PNG per step, so a human (or a reviewing
+agent) can see the rendered window rather than trust a passing assertion.
+
+The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
+not compiled and the shipped binary carries no test hook. `lognotes-qt/driver_shim.h` is the only C++ in
+the project that is not generated.

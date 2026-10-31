@@ -1,0 +1,50 @@
+//! Development-only access to the live window: press keys, look at it, count rows.
+//!
+//! Exists so a test can drive the real QML instead of asserting about it from the outside. Compiled
+//! only under the `driver` feature — the shipped application links neither this nor QtTest.
+
+#[cxx_qt::bridge]
+mod ffi {
+    unsafe extern "C++" {
+        include!(<lognotes-qt/driver_shim.h>);
+        include!("cxx-qt-lib/qqmlapplicationengine.h");
+        include!("cxx-qt-lib/qstring.h");
+
+        type QQmlApplicationEngine = cxx_qt_lib::QQmlApplicationEngine;
+        type QString = cxx_qt_lib::QString;
+
+        #[rust_name = "attach"]
+        fn lognotes_attach(engine: &QQmlApplicationEngine) -> bool;
+        #[rust_name = "type_text"]
+        fn lognotes_type_text(text: &QString) -> bool;
+        #[rust_name = "press_key"]
+        fn lognotes_press_key(key: i32, modifiers: i32) -> bool;
+        #[rust_name = "save_png"]
+        fn lognotes_save_png(path: &QString) -> bool;
+        #[rust_name = "wait_ms"]
+        fn lognotes_wait_ms(ms: i32);
+        #[rust_name = "focus_name"]
+        fn lognotes_focus_name() -> QString;
+        #[rust_name = "row_count"]
+        fn lognotes_row_count() -> i32;
+    }
+}
+
+pub use ffi::*;
+
+/// Qt's own key codes, so a scenario reads like the keymap instead of like numbers.
+pub mod key {
+    pub const RETURN: i32 = 0x0100_0004;
+    pub const TAB: i32 = 0x0100_0001;
+    pub const BACKTAB: i32 = 0x0100_0002;
+    pub const BACKSPACE: i32 = 0x0100_0003;
+    pub const UP: i32 = 0x0100_0013;
+    pub const DOWN: i32 = 0x0100_0015;
+    pub const Z: i32 = 0x5A;
+}
+
+pub mod modifier {
+    pub const NONE: i32 = 0x0000_0000;
+    pub const CTRL: i32 = 0x0400_0000;
+    pub const SHIFT: i32 = 0x0200_0000;
+}
