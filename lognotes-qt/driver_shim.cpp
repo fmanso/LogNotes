@@ -2,6 +2,7 @@
 
 #include <QAbstractItemModel>
 #include <QCoreApplication>
+#include <QList>
 #include <QEventLoop>
 #include <QImage>
 #include <QKeyEvent>
@@ -9,6 +10,8 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QWheelEvent>
+#include <QMouseEvent>
 
 namespace {
 QObject* g_root = nullptr;
@@ -89,6 +92,85 @@ QString lognotes_focus_name() {
     }
     return item->objectName().isEmpty() ? QString::fromLatin1(item->metaObject()->className())
                                         : item->objectName();
+}
+
+namespace {
+void collect_editors(QQuickItem* item, QList<QQuickItem*>& out) {
+    if (!item) {
+        return;
+    }
+    if (item->objectName() == QLatin1String("blockEditor") && item->isVisible()) {
+        out.append(item);
+    }
+    // Walk the visual tree: ListView delegates live under the content item, not as QObject
+    // children of the window.
+    for (auto* child : item->childItems()) {
+        collect_editors(child, out);
+    }
+}
+
+QList<QQuickItem*> block_editors() {
+    QList<QQuickItem*> editors;
+    if (auto* w = window()) {
+        collect_editors(w->contentItem(), editors);
+    }
+    return editors;
+}
+} // namespace
+
+bool lognotes_click_block(int index) {
+    auto* w = window();
+    const auto editors = block_editors();
+    if (!w || index < 0 || index >= editors.size()) {
+        return false;
+    }
+    auto* item = editors.at(index);
+    const QPointF centre = item->mapToScene(QPointF(item->width() / 2.0, item->height() / 2.0));
+    const QPointF global = w->mapToGlobal(centre.toPoint());
+
+    QMouseEvent press(QEvent::MouseButtonPress, centre, global, Qt::LeftButton, Qt::LeftButton,
+                      Qt::NoModifier);
+    QCoreApplication::sendEvent(w, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, centre, global, Qt::LeftButton, Qt::NoButton,
+                        Qt::NoModifier);
+    QCoreApplication::sendEvent(w, &release);
+    return true;
+}
+
+QString lognotes_editor_text(int index) {
+    const auto editors = block_editors();
+    if (index < 0 || index >= editors.size()) {
+        return {};
+    }
+    return editors.at(index)->property("text").toString();
+}
+
+bool lognotes_scroll(int angle_delta) {
+    auto* w = window();
+    if (!w) {
+        return false;
+    }
+    const QPointF centre(w->width() / 2.0, w->height() / 2.0);
+    QWheelEvent wheel(centre, w->mapToGlobal(centre.toPoint()), QPoint(0, 0),
+                      QPoint(0, angle_delta), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase,
+                      false);
+    QCoreApplication::sendEvent(w, &wheel);
+    return true;
+}
+
+bool lognotes_close() {
+    auto* w = window();
+    return w ? w->close() : false;
+}
+
+QString lognotes_journal_error() {
+    auto* model = journal_model();
+    return model ? model->property("error").toString() : QStringLiteral("<no model>");
+}
+
+bool lognotes_journal_ready() {
+    auto* model = journal_model();
+    return model && model->property("ready").toBool();
 }
 
 int lognotes_row_count() {

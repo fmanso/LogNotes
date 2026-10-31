@@ -25,6 +25,22 @@ ApplicationWindow {
     property bool rebuilding: false
     property int focusRetries: 0
 
+    // Text typed but not yet written, keyed by row. The debounce would otherwise lose it when the
+    // window closes: the process exits before the timer fires.
+    property var unsaved: ({})
+
+    function flushUnsaved() {
+        for (const row in root.unsaved) {
+            journal.save_now(Number(row), root.unsaved[row])
+        }
+        root.unsaved = ({})
+    }
+
+    onClosing: function (close) {
+        root.flushUnsaved()
+        close.accepted = true
+    }
+
     Journal {
         id: journal
     }
@@ -50,6 +66,8 @@ ApplicationWindow {
 
         function onRevisionChanged() {
             root.rebuilding = false
+            // Every applied snapshot means the pending text has been written.
+            root.unsaved = ({})
             if (root.wantsFocus && root.focusRow >= 0) {
                 root.focusRetries = 0
                 Qt.callLater(root.focusBlock, root.focusRow)
@@ -223,6 +241,7 @@ ApplicationWindow {
                         root.focusRow = index
                         root.focusCursor = cursorPosition
                         root.wantsFocus = true
+                        root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
                         debounce.restart()
                     }
 
@@ -299,6 +318,7 @@ ApplicationWindow {
 
             Label {
                 text: qsTr("LogNotes could not open its database.")
+                color: "#242424"
                 font.pixelSize: 18
                 font.bold: true
             }
@@ -308,6 +328,13 @@ ApplicationWindow {
                 text: journal.error
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                 color: "#7a3a3a"
+            }
+
+            Label {
+                width: parent.width
+                text: qsTr("Your notes are still on disk; LogNotes just cannot open them right now.")
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                color: "#5b5b5b"
             }
 
             Row {

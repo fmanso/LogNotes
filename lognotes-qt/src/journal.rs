@@ -94,6 +94,11 @@ pub mod qobject {
         #[qinvokable]
         fn submit_block(self: Pin<&mut Self>, row: i32, offset: i32, text: &QString);
 
+        /// Persist an edit and wait for the worker to commit it — used when the window closes, where a
+        /// debounced save would otherwise be lost with the process.
+        #[qinvokable]
+        fn save_now(self: Pin<&mut Self>, row: i32, text: &QString);
+
         #[qinvokable]
         fn indent(self: Pin<&mut Self>, row: i32);
 
@@ -167,6 +172,11 @@ enum Job {
         command: Option<Command>,
         dates: Vec<String>,
         queue: CxxQtThread<Journal>,
+    },
+    /// Run a command and signal completion, so the caller can wait for the write to land.
+    Flush {
+        command: Command,
+        done: Sender<()>,
     },
 }
 
@@ -297,6 +307,31 @@ impl qobject::Journal {
         self.as_mut().dispatch(Some(command));
     }
 
+    fn save_now(mut self: Pin<&mut Self>, row: i32, text: &QString) {
+        let Some(target) = self.rows.get(row as usize).cloned() else {
+            return;
+        };
+        if target.heading {
+            return;
+        }
+        let command = if target.placeholder {
+            Command::Materialize {
+                date: target.date,
+                text: text.to_string(),
+            }
+        } else {
+            Command::Update {
+                block_id: target.block_id,
+                text: text.to_string(),
+            }
+        };
+        let (done, wait) = mpsc::channel();
+        if self.send(Job::Flush { command, done }) {
+            // Bounded so a wedged worker cannot hang the close forever.
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
+        }
+    }
+
     fn submit_block(mut self: Pin<&mut Self>, row: i32, offset: i32, text: &QString) {
         let Some(target) = self.rows.get(row as usize).cloned() else {
             return;
@@ -394,8 +429,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
         match job {
             Job::Start { dates, queue } => {
                 let opened = match DATABASE_PATH.get() {
-                    Some(path) => Store::open(path)
-                        .map_err(|error| format!("{error}\n{}", path.display())),
+                    // The storage error already names the file, so it is not appended again.
+                    Some(path) => Store::open(path).map_err(|error| error.to_string()),
                     None => Err("no database path was configured".to_string()),
                 };
                 match opened {
@@ -415,6 +450,12 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         },
                     ),
                 }
+            }
+            Job::Flush { command, done } => {
+                if let Some(store) = store.as_mut() {
+                    let _ = run_command(store, command);
+                }
+                let _ = done.send(());
             }
             Job::Run {
                 command,

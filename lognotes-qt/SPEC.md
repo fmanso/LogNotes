@@ -47,7 +47,8 @@ materialises a day (`ensure_journal_page` + insert). This is a view-layer rule, 
 ## Threading and delivery
 
 The worker loop owns `Store` for its lifetime and receives `Job`s over a channel: `Start` (open, or
-re-open after an error) and `Run` (an optional command, then a fresh snapshot of the loaded dates). It
+re-open after an error), `Run` (an optional command, then a fresh snapshot of the loaded dates), and
+`Flush` (a command plus a completion signal, for writes that must land before the process exits). It
 delivers results by queueing a closure back onto the object's thread, so model resets and property
 changes only ever happen on the GUI thread. Commands are `Update`, `Materialize`, `Submit`, `Indent`,
 `Outdent`, `Delete`, `Undo`, `Redo` — each a thin translation to exactly one core call, except `Submit`,
@@ -77,6 +78,10 @@ list by `CHUNK_DAYS` (14) and asks for a snapshot of the larger window.
   dispatched and cleared when its snapshot arrives, suppresses exactly that save.
 - **Backspace on an empty block deletes; on a day's first block it simply does nothing** beyond clearing
   text, because the core refuses to merge across pages.
+- **Closing flushes the pending edit.** Typing is debounced, so closing the window would otherwise drop
+  whatever was typed in the last 250 ms. The window keeps the unsaved text per row and, on close, calls
+  `save_now` for each: that job carries a completion channel, so the close waits for the worker to commit
+  (bounded at 2 s) instead of racing the process exit.
 - **Nothing here renders task markers or links yet** — the roles exist in the schema, but `data` does not
   expose them. Folding is likewise not implemented: every block renders expanded.
 
@@ -105,9 +110,17 @@ cargo run -p lognotes-qt --features driver -- --livetest
 ```
 
 It writes to a throwaway database under `$TMPDIR/lognotes-livetest`, loads the same `main.qml` the app
-loads, and types real `QKeyEvent`s into the focused item: type, Enter, Tab, Shift+Tab, Ctrl+Z — checking
-the stored rows and depths after each step. It also saves a PNG per step, so a human (or a reviewing
-agent) can see the rendered window rather than trust a passing assertion.
+loads, and drives it through the real input path: typing, Enter, Tab, Shift+Tab, Ctrl+Z, a mouse click on
+a block, wheel scrolling to pull in an older chunk, and finally a close with a pending debounce. Each step
+is checked against the stored rows and depths, and every step saves a PNG so a human (or a reviewing agent)
+can see the rendered window rather than trust a passing assertion.
+
+`--livetest-error` covers the other half: it points the store at an unopenable path and asserts the error
+pane appears with no rows, screenshotting it. That run is what caught the error heading being drawn in the
+theme's default near-white on a cream background.
+
+Qt key codes are a trap worth stating once: `0x01000007` is Delete, not End (`0x01000011`). A wrong
+constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
 not compiled and the shipped binary carries no test hook. `lognotes-qt/driver_shim.h` is the only C++ in

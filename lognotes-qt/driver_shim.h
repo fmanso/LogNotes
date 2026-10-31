@@ -30,3 +30,21 @@ QString lognotes_focus_name();
 
 // How many rows the journal model currently has.
 int lognotes_row_count();
+
+// Clicks the centre of the window's index-th visible block editor (0-based).
+bool lognotes_click_block(int index);
+
+// Text currently shown in the index-th visible block editor, or empty if there is none.
+QString lognotes_editor_text(int index);
+
+// Scrolls the column by `angle_delta` wheel units; negative scrolls into the past.
+bool lognotes_scroll(int angle_delta);
+
+// Closes the window, running its close handlers.
+bool lognotes_close();
+
+// The journal model's `error` text, empty when it opened fine.
+QString lognotes_journal_error();
+
+// Whether the journal model reports itself ready.
+bool lognotes_journal_ready();

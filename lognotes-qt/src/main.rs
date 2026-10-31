@@ -21,8 +21,14 @@ const MAIN_QML: &str = "qrc:/qt/qml/com/lognotes/app/qml/main.qml";
 
 fn main() {
     #[cfg(feature = "driver")]
-    if std::env::args().any(|argument| argument == "--livetest") {
-        livetest::run();
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|argument| argument == "--livetest") {
+            livetest::run();
+        }
+        if args.iter().any(|argument| argument == "--livetest-error") {
+            livetest::run_error();
+        }
     }
 
     let path = database_path();

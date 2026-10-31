@@ -27,6 +27,18 @@ mod ffi {
         fn lognotes_focus_name() -> QString;
         #[rust_name = "row_count"]
         fn lognotes_row_count() -> i32;
+        #[rust_name = "click_block"]
+        fn lognotes_click_block(index: i32) -> bool;
+        #[rust_name = "editor_text"]
+        fn lognotes_editor_text(index: i32) -> QString;
+        #[rust_name = "scroll"]
+        fn lognotes_scroll(angle_delta: i32) -> bool;
+        #[rust_name = "close_window"]
+        fn lognotes_close() -> bool;
+        #[rust_name = "journal_error"]
+        fn lognotes_journal_error() -> QString;
+        #[rust_name = "journal_ready"]
+        fn lognotes_journal_ready() -> bool;
     }
 }
 
@@ -41,6 +53,8 @@ pub mod key {
     pub const UP: i32 = 0x0100_0013;
     pub const DOWN: i32 = 0x0100_0015;
     pub const Z: i32 = 0x5A;
+    // Qt::Key_Home/Key_End sit at 0x01000010/0x01000011 — 0x01000007 is Delete.
+    pub const END: i32 = 0x0100_0011;
 }
 
 pub mod modifier {
