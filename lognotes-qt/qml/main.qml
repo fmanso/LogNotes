@@ -60,6 +60,24 @@ ApplicationWindow {
         close.accepted = true
     }
 
+    // Every button in the window: an outlined, quiet control in the app's own palette, instead of the
+    // control style's default dark chrome (which read as a different application on a cream page).
+    component QuietButton: Button {
+        id: control
+        background: Rectangle {
+            color: control.hovered ? "#ece7de" : "transparent"
+            border.color: "#d9d3c8"
+            radius: 6
+        }
+        contentItem: Label {
+            text: control.text
+            color: "#242424"
+            font.pixelSize: 13
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+    }
+
     Journal {
         id: journal
     }
@@ -213,6 +231,12 @@ ApplicationWindow {
         focus: true
         padding: 12
 
+        background: Rectangle {
+            color: "#faf9f7"
+            border.color: "#ddd8ce"
+            radius: 8
+        }
+
         function openFor(rowIndex) {
             row = rowIndex
             picked = new Date()
@@ -265,7 +289,7 @@ ApplicationWindow {
             Row {
                 spacing: 6
 
-                Button {
+                QuietButton {
                     text: "\u2039"
                     onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
                                                               datePopup.monthAnchor.getMonth() - 1, 1)
@@ -279,7 +303,7 @@ ApplicationWindow {
                     color: "#242424"
                 }
 
-                Button {
+                QuietButton {
                     text: "\u203a"
                     onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
                                                               datePopup.monthAnchor.getMonth() + 1, 1)
@@ -306,7 +330,7 @@ ApplicationWindow {
                 spacing: 8
                 anchors.right: parent.right
 
-                Button {
+                QuietButton {
                     text: qsTr("Clear")
                     onClicked: {
                         root.rebuilding = true
@@ -315,7 +339,7 @@ ApplicationWindow {
                     }
                 }
 
-                Button {
+                QuietButton {
                     text: qsTr("Today")
                     onClicked: {
                         datePopup.picked = new Date()
@@ -324,7 +348,7 @@ ApplicationWindow {
                     }
                 }
 
-                Button {
+                QuietButton {
                     text: qsTr("OK")
                     onClicked: datePopup.accept()
                 }
@@ -348,7 +372,7 @@ ApplicationWindow {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 10
 
-            Button {
+            QuietButton {
                 objectName: "pagesButton"
                 text: qsTr("Pages")
                 onClicked: pagesPopup.open()
@@ -361,10 +385,17 @@ ApplicationWindow {
         parent: Overlay.overlay
         x: 28
         y: 44
-        width: 320
-        height: Math.min(400, 44 + (root.pageList.length + 1) * 30)
+        width: 328
+        height: Math.min(400, 14 + (root.pageList.length + 1) * 30)
+        padding: 6
         modal: false
         focus: true
+
+        background: Rectangle {
+            color: "#faf9f7"
+            border.color: "#ddd8ce"
+            radius: 8
+        }
 
         contentItem: Column {
             spacing: 0
@@ -372,9 +403,11 @@ ApplicationWindow {
 
             Rectangle {
                 objectName: "pageEntry"
-                width: pagesPopup.width
+                width: pagesPopup.availableWidth
                 height: 30
-                color: "transparent"
+                radius: 5
+                property bool hovered: false
+                color: hovered ? "#ece7de" : "transparent"
 
                 Label {
                     anchors.verticalCenter: parent.verticalCenter
@@ -386,6 +419,9 @@ ApplicationWindow {
 
                 MouseArea {
                     anchors.fill: parent
+                    hoverEnabled: true
+                    onEntered: parent.hovered = true
+                    onExited: parent.hovered = false
                     onClicked: {
                         root.unlinkedExpanded = false
                         root.focusRow = -1
@@ -402,9 +438,11 @@ ApplicationWindow {
 
                 Rectangle {
                     objectName: "pageEntry"
-                    width: pagesPopup.width
+                    width: pagesPopup.availableWidth
                     height: 30
-                    color: "transparent"
+                    radius: 5
+                    property bool hovered: false
+                    color: hovered ? "#ece7de" : "transparent"
 
                     Label {
                         anchors.verticalCenter: parent.verticalCenter
@@ -418,6 +456,9 @@ ApplicationWindow {
 
                     MouseArea {
                         anchors.fill: parent
+                        hoverEnabled: true
+                        onEntered: parent.hovered = true
+                        onExited: parent.hovered = false
                         onClicked: {
                             root.unlinkedExpanded = false
                             root.focusRow = -1
@@ -598,10 +639,6 @@ ApplicationWindow {
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
                     activeFocusOnPress: true
-
-                    // Styling lives on this editor's own document, so the caret, the undo stack and the
-                    // markdown that gets saved are untouched by it.
-                    Component.onCompleted: journal.attach_highlighter(editor.textDocument)
 
                     // A block is always in edit mode, so a plain click has to keep meaning "put the
                     // caret here": only Ctrl+click navigates.
@@ -890,12 +927,12 @@ ApplicationWindow {
             Row {
                 spacing: 10
 
-                Button {
+                QuietButton {
                     text: qsTr("Retry")
                     onClicked: journal.start()
                 }
 
-                Button {
+                QuietButton {
                     text: qsTr("Quit")
                     onClicked: Qt.quit()
                 }

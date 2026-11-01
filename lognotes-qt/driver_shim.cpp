@@ -263,54 +263,6 @@ QString lognotes_named_text(const QString& name, int index) {
     return item->property("source").toString();
 }
 
-QString lognotes_editor_format(int index, int offset) {
-    auto* w = window();
-    if (!w) {
-        return QString();
-    }
-    const auto rows = block_rows();
-    if (index < 0 || index >= rows.size()) {
-        return QString();
-    }
-    auto* editor = editor_of(rows.at(index));
-    if (!editor) {
-        return QString();
-    }
-
-    // cxx-qt gives QML a QQuickTextDocument; the formats live on the QTextDocument inside it.
-    auto* wrapper = qobject_cast<QQuickTextDocument*>(
-        editor->property("textDocument").value<QObject*>());
-    if (!wrapper || !wrapper->textDocument()) {
-        return QString();
-    }
-    QTextDocument* document = wrapper->textDocument();
-    if (offset < 0 || offset >= document->characterCount() - 1) {
-        return QString();
-    }
-
-    // A highlighter sets formats on the block's *layout*, not on the document's fragments, so this is
-    // the only place they can be read back from.
-    const QTextBlock block = document->findBlock(offset);
-    if (!block.isValid() || !block.layout()) {
-        return QString();
-    }
-    const int inBlock = offset - block.position();
-    QTextCharFormat format;
-    for (const QTextLayout::FormatRange& range : block.layout()->formats()) {
-        if (range.start <= inBlock && inBlock < range.start + range.length) {
-            format = range.format;
-            break;
-        }
-    }
-
-    return QString("weight=%1 italic=%2 strike=%3 mono=%4 underline=%5")
-        .arg(format.fontWeight())
-        .arg(format.fontItalic() ? 1 : 0)
-        .arg(format.fontStrikeOut() ? 1 : 0)
-        .arg(format.hasProperty(QTextFormat::FontFamilies) ? 1 : 0)
-        .arg(format.fontUnderline() ? 1 : 0);
-}
-
 bool lognotes_scroll_to_end() {
     auto* w = window();
     if (!w) {

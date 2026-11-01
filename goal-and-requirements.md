@@ -39,9 +39,9 @@ application small enough to fully own and trim.
   references inferred from 0.x behavior — unconfirmed.)*
 - **Markdown, rendered.** A block shows its text finished: bold, italic, code, headings and quotes are
   styled, `[[links]]`, `#tags` and external links are followable, and a ```mermaid fence draws its diagram
-  beneath itself. Clicking a block swaps in the raw markdown — marks visible, dimmed — to edit it, and
-  leaving it renders again. What is stored is always the markdown. The agenda and the reference panels show
-  the same finished rendering.
+  beneath itself. Clicking a block swaps in its plain text — every character alike, marks and all, nothing
+  styled — to edit it, and leaving it renders again. What is stored is always the markdown. The agenda and
+  the reference panels show the same finished rendering.
 - **Tasks.** Blocks are marked `TODO`, `DOING`, or `DONE`, cycled by a shortcut. *(`DOING` inferred from
   0.x task markers — unconfirmed; `DONE` is confirmed.)*
 - **Scheduled blocks.** A block can carry a `SCHEDULED` date — the maker's way of remembering future

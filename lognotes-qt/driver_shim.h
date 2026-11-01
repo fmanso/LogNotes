@@ -46,10 +46,6 @@ bool lognotes_click_named(const QString& name, int index);
 // or an empty string. How a rendered summary row and a drawn diagram are checked.
 QString lognotes_named_text(const QString& name, int index);
 
-// What markdown styling was applied to one character of the index-th block editor: the character at
-// `offset` counts in UTF-16, as the editor's own positions do. Empty when there is no such character.
-QString lognotes_editor_format(int index, int offset);
-
 // Puts the column at its end, which is what pulls in an older chunk. Qt Quick ignores synthetic wheel
 // events under this compositor, so the harness drives the same end-of-column path directly.
 bool lognotes_scroll_to_end();

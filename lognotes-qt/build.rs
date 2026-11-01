@@ -5,10 +5,7 @@ fn main() {
         QmlModule::new("com.lognotes.app").qml_file("qml/main.qml"),
     )
     .qt_module("Quick")
-    .qt_module("Gui")
-    .files(["src/journal.rs"])
-    // Styling a block's markdown needs a QTextCharFormat, which only C++ can hand a text document.
-    .cpp_file("markdown_shim.cpp");
+    .files(["src/journal.rs"]);
 
     // The live-test driver is development-only: without this feature the app links no QtTest and
     // carries no test hooks.

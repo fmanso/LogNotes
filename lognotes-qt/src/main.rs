@@ -9,7 +9,6 @@
 
 mod diagram;
 mod journal;
-mod markdown;
 
 #[cfg(feature = "driver")]
 mod driver;

@@ -17,9 +17,9 @@ the user does back to the worker thread that owns the store.
 One QObject, `Journal`, plus one QML window. It translates: rows for the view, commands for the core. It
 holds no note data of its own beyond the rows currently on screen, and it never constructs SQL.
 
-It also draws what the text means, without ever rewriting it: each block editor is styled in place by a
-syntax highlighter, a read-only row is rendered from escaped HTML, and a ```mermaid fence is drawn to an
-SVG the view loads.
+It also draws what the text means, without ever rewriting it: a block at rest and a read-only row are
+rendered from escaped HTML, a ```mermaid fence is drawn to an SVG the view loads, and the editor itself is
+plain text — styling is for reading, never for editing.
 
 ## Boundary
 
@@ -140,7 +140,7 @@ and it keeps the database path the only OS-specific location in the codebase.
   `save_now` for each: that job carries a completion channel, so the close waits for the worker to commit
   (bounded at 2 s) instead of racing the process exit.
 - **A block has two views of one text.** At rest it is a read-only rich `TextEdit` over the `html` role —
-  the markdown rendered, marks gone — and the editable `TextEdit` is hidden. Clicking the rendered text
+  the markdown rendered, marks gone — and the plain editor is hidden. Clicking the rendered text
   enters edit mode at the caret the click landed on, translated back into the raw text by `raw_position`
   (the rendered text is shorter than the raw one, so the two offsets are not the same number). Moving the
   caret away renders the block again. `editingRow` lives on the window, not on a delegate, because every
@@ -158,14 +158,11 @@ and it keeps the database path the only OS-specific location in the codebase.
   from the mechanism rather than from a test: Qt Quick ignores a synthesised input-method event, so the
   harness cannot exercise the path — a dead key on the Spanish layout, which is what ` is there, is the
   case it exists for.
-- **Markdown is applied as text formats, never as content.** A `QSyntaxHighlighter` is attached to each
-  block editor's document and rescans that document's own text on every change, so a link still being
-  typed is already styled and nothing waits for the debounced save. Formats carry the resolved weight,
-  size and colour — the palette lives in `markdown.rs`, and the shim knows nothing about markdown. It
-  sets no characters, so the caret, the undo stack and the stored markdown behave exactly as they did
-  before a block was styled. `highlightBlock` is handed one paragraph at a time while a fence spans
-  lines, so the shim passes the whole document with the paragraph's range and Rust cuts the answer down to
-  it.
+- **Editing is plain text.** The editor is a bare `TextEdit`: no character formats, no syntax
+  highlighter, nothing styled — every character the same weight, colour and size, marks showing as
+  themselves. Styling belongs to the rendered view only, which is why nothing in the editor can fight the
+  caret or the undo stack. This started as a highlighter that dimmed the marks while typing; it was
+  removed, and with it the hand-written C++ shim and the format buffer that fed it.
 - **Enter continues a fence; elsewhere it splits the block.** With the caret inside an open fence — on the
   line that opened it or in its body — Enter adds a line to the block, so typing ``` is all it takes to
   start a code block; on the closing line, or outside any fence, Enter splits into a new block as before.
@@ -177,6 +174,10 @@ and it keeps the database path the only OS-specific location in the codebase.
   rescans the *editor's* text rather than the stored one, so an unsaved link is clickable too. One
   function, `openLink`, decides what a `page:` href or a URL does, for the editor and for read-only rows
   alike.
+- **One button style, one popup palette.** `QuietButton` is the window's only button: an outlined control in
+  the page's own colours. The Pages popup and the date picker are cream panels with a hairline border and a
+  tinted hover row, because the control style's default chrome is dark and the text drawn on it was
+  `#242424` on `#2a2a2a` — a page list you could not read.
 - **A read-only row is rendered, not styled.** The agenda and reference rows are `Label`s with rich text
   from the `html` role: the scan's dim spans are dropped, so the row reads as finished text, and its links
   navigate on a plain click.
@@ -238,10 +239,10 @@ Qt key codes are a trap worth stating once: `0x01000007` is Delete, not End (`0x
 constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
-not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
-readers: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
-diagram's URL) and the formats applied to one character of an editor (`editor_format`). Its block helpers
-address a row and then pick the view inside it, because a block may be showing either the editor or its
-rendered form, and a row with a diagram is far taller than its text. Formatting has to be checked
+not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes one
+reader: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
+diagram's URL). Its block helpers address a row and then pick the view inside it, because a block may be
+showing either the editor or its rendered form, and a row with a diagram is far taller than its text. It
+activates its window on attach, because an input method only delivers to an active one. Formatting has to be checked
 that way because a highlighter writes to the block's *layout*, not to the document's character formats, and
 a screenshot alone cannot tell a passing render from a lucky one.

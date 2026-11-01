@@ -50,13 +50,6 @@ pub mod qobject {
 
         include!("cxx-qt-lib/qhash.h");
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
-
-        include!(<lognotes-qt/markdown_shim.h>);
-
-        /// Hand a block editor's document to the markdown highlighter. The document arrives as a
-        /// `QVariant` because QML will not convert a `QQuickTextDocument` to a `QObject` parameter.
-        #[rust_name = "install_highlighter"]
-        fn lognotes_install_highlighter(document: &QVariant) -> bool;
     }
 
     #[qenum(Journal)]
@@ -150,10 +143,6 @@ pub mod qobject {
         /// Open a named page: its blocks and its references. Creates the page if it does not exist.
         #[qinvokable]
         fn open_page(self: Pin<&mut Self>, name: &QString);
-
-        /// Style a block editor's text as markdown. Called once per editor, as its delegate is built.
-        #[qinvokable]
-        fn attach_highlighter(self: Pin<&mut Self>, document: &QVariant);
 
         /// The link under `position` in `text`, as `page:<name>` for a page link or a tag and the URL
         /// itself for an external one. Empty when the caret is not on a link.
@@ -554,12 +543,6 @@ impl qobject::Journal {
         }
         self.as_mut().rust_mut().mode = Mode::Page(name);
         self.as_mut().dispatch(None);
-    }
-
-    /// The highlighter needs nothing from the model: it rescans the editor's live text on every change,
-    /// which is what keeps the styling in step with typing that has not been saved yet.
-    fn attach_highlighter(self: Pin<&mut Self>, document: &QVariant) {
-        let _ = qobject::install_highlighter(document);
     }
 
     fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool {

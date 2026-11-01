@@ -170,8 +170,8 @@ asks it: `scan` returns styled spans, the links and tags with the byte ranges th
 with their language and code. Spans are style *flags* — dim, bold, italic, strike, code, heading, link —
 so nesting composes (italic inside bold) and a caller picks what to do with each.
 
-Two rules make the rest of the app possible: syntax marks are their own dim spans, so a view can keep
-them (the editor) or drop them (anything rendered) from the same scan; and `to_html` / `to_html_block`
+Two rules make the rest of the app possible: syntax marks are their own dim spans, so a rendered view can
+drop them while the raw text keeps them; and `to_html` / `to_html_block`
 render a block as escaped HTML with the marks gone and links carrying `page:<name>` or their URL — one
 line for a summary row, line breaks kept for a block at rest, where a fence has to stay a block of code.
 Every character of the note is escaped there, so nothing a note says can become markup.

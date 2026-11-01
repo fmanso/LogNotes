@@ -290,22 +290,11 @@ pub fn run() -> ! {
     driver::wait_ms(700);
     shot("18-markdown-typed");
 
-    // The block is plain ASCII, so a byte offset from `find` is also the UTF-16 position the editor
-    // counts in.
     let typed = driver::editor_text(0).to_string();
-    let bold_at = typed.find("bold").expect("the bold word is in the block") as i32;
-    let code_at = typed.find("code").expect("the code word is in the block") as i32;
-    let bold_format = driver::editor_format(0, bold_at).to_string();
-    let code_format = driver::editor_format(0, code_at).to_string();
     check(
-        "bold is drawn bold while the marks stay in the text",
-        bold_format.contains("weight=700") && typed.contains("**bold**"),
-        format!("format={bold_format} text={typed:?}"),
-    );
-    check(
-        "inline code is drawn in a fixed pitch",
-        code_format.contains("mono=1"),
-        format!("format={code_format}"),
+        "the editor shows plain text, marks and all",
+        typed.contains("**bold**") && typed.contains("`code`"),
+        format!("text={typed:?}"),
     );
 
     // ---- a block at rest renders its markdown ----------------------------------------------

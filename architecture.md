@@ -59,10 +59,11 @@ about what it links to; the link table can be dropped and rebuilt from it at any
 
 **Markdown is read from the text, never stored beside it.** One scanner in core turns a block's text into
 styled spans, links and fences. A block at rest draws them as escaped HTML — marks gone, links live — and
-clicking it swaps in the editor, which draws the same spans as text formats over the raw text. Styling is
-layout, not content: the characters, the undo stack and the stored markdown are exactly what they were, and
-the click that switches forms is translated from a caret in the rendered text back to the raw one rather
-than guessed.
+clicking it swaps in a plain-text editor: one weight, one colour, one size, the marks visible as the
+characters they are. Styling is therefore something only the *reader* sees, which keeps the editor exactly
+as inert as it was before markdown existed — no character formats to fight the caret or the undo stack —
+and the click that switches forms is translated from a caret in the rendered text back to the raw one
+rather than guessed.
 The rejected alternatives are what make this the decision it is — a rich-text document, or a second
 styled copy of the text, would each give the app two truths about a block that can drift apart, and put
 the caret and the saved text at the mercy of a renderer.
