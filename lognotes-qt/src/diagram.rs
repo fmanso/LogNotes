@@ -125,6 +125,17 @@ mod tests {
     }
 
     #[test]
+    fn a_fence_with_no_body_yet_is_not_a_crash() {
+        // The moment ```mermaid is typed the fence is a fence with nothing in it — the debounce will
+        // render that, long before a person has typed a single line of diagram.
+        let mut diagrams = Diagrams::default();
+        let drawn = diagrams.for_text("```mermaid").expect("a mermaid fence");
+
+        assert!(drawn.source.is_empty());
+        assert!(drawn.error.starts_with("diagram error: "), "got {:?}", drawn.error);
+    }
+
+    #[test]
     fn ordinary_code_is_not_a_diagram() {
         let mut diagrams = Diagrams::default();
 

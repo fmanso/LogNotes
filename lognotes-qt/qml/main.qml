@@ -89,7 +89,11 @@ ApplicationWindow {
             root.unsaved = ({})
             if (root.wantsFocus && root.focusRow >= 0) {
                 root.focusRetries = 0
-                Qt.callLater(root.focusBlock, root.focusRow)
+                // Take the focus back now rather than next frame, for the same reason a click does:
+                // whatever is typed while the model rebuilds must land in the block being edited.
+                if (!root.focusBlock(root.focusRow)) {
+                    Qt.callLater(root.focusBlock, root.focusRow)
+                }
             }
         }
     }
@@ -120,15 +124,19 @@ ApplicationWindow {
         return 1
     }
 
-    // Clicking a rendered block enters edit mode at the caret the click landed on. The editor only
-    // becomes focusable once it is visible, so the focus call waits a frame.
+    // Clicking a rendered block enters edit mode at the caret the click landed on. Focus is taken in the
+    // same event, not on the next frame: a keystroke typed the instant the block is clicked has to land
+    // in it, and a frame's delay loses the character. The deferred attempt stays for the case where the
+    // delegate for that row is not instantiated yet.
     function beginEdit(row, caret) {
         root.editingRow = row
         root.focusRow = row
         root.focusCursor = Math.max(0, caret)
         root.wantsFocus = true
         root.focusRetries = 0
-        Qt.callLater(root.focusBlock, row)
+        if (!root.focusBlock(row)) {
+            Qt.callLater(root.focusBlock, row)
+        }
     }
 
     function focusBlock(row) {

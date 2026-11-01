@@ -337,6 +337,62 @@ pub fn run() -> ! {
         format!("{raw_before:?} -> {raw_after:?}"),
     );
 
+    // Typing the instant a rendered block is clicked: a person does not wait for the next frame, so the
+    // keystrokes have to land rather than go nowhere.
+    let before_instant = driver::editor_text(1).to_string();
+    driver::click_block(1);
+    driver::type_text(&QString::from("xyz"));
+    driver::wait_ms(800);
+    let after_instant = driver::editor_text(1).to_string();
+    check(
+        "typing straight after clicking a rendered block is not lost",
+        after_instant.contains("xyz") && after_instant.len() == before_instant.len() + 3,
+        format!("{before_instant:?} -> {after_instant:?}"),
+    );
+
+    // The same hazard one step earlier: Enter starts a new block asynchronously, so the next keystroke
+    // has to land in it. 60 ms is a fast typist's gap; the split's own round trip is shorter than that.
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(60);
+    driver::type_text(&QString::from("qp"));
+    driver::wait_ms(800);
+    check(
+        "typing straight after Enter is not lost",
+        driver::editor_text(2).to_string() == "qp",
+        format!(
+            "row2={:?} row1={:?} row0={:?} focus={}",
+            driver::editor_text(2).to_string(),
+            driver::editor_text(1).to_string(),
+            driver::editor_text(0).to_string(),
+            driver::focus_name().to_string()
+        ),
+    );
+
+    // ---- starting a code block by typing ``` -----------------------------------------------
+    // A new block, then the three backticks typed quickly — each keystroke landing inside the debounce
+    // window, which is what a person does.
+    driver::click_block(1);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::CTRL);
+    driver::wait_ms(100);
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(700);
+    for _ in 0..3 {
+        driver::type_text(&QString::from("`"));
+        driver::wait_ms(90);
+    }
+    driver::wait_ms(800);
+    shot("21-typing-backticks");
+    let started = driver::editor_text(2).to_string();
+    check(
+        "typing ``` in a new block keeps the caret in it",
+        driver::focus_name().to_string() == "blockEditor" && started == "```",
+        format!(
+            "focus={} text={started:?}",
+            driver::focus_name().to_string()
+        ),
+    );
+
     // ---- a fence that spans lines, and the diagram it draws ---------------------------------
     let blocks_before_fence = blocks(&root).len();
     driver::click_block(0);
@@ -358,7 +414,7 @@ pub fn run() -> ! {
     driver::wait_ms(150);
     driver::type_text(&QString::from("```"));
     driver::wait_ms(1800);
-    shot("21-diagram");
+    shot("22-diagram");
 
     let fenced = blocks(&root);
     check(
@@ -391,7 +447,7 @@ pub fn run() -> ! {
     driver::wait_ms(150);
     driver::type_text(&QString::from("this is not a diagram"));
     driver::wait_ms(1800);
-    shot("22-diagram-error");
+    shot("23-diagram-error");
 
     let error = driver::named_text(&QString::from("diagramError"), 0).to_string();
     check(

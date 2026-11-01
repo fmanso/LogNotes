@@ -146,6 +146,12 @@ and it keeps the database path the only OS-specific location in the codebase.
   caret away renders the block again. `editingRow` lives on the window, not on a delegate, because every
   save rebuilds the delegates and the open block has to stay open across that.
 - **An empty block is always the editor**, since there is nothing rendered to click.
+- **Focus is taken in the same event, not on the next frame.** A keystroke typed the instant a block is
+  clicked has to land in it, and a frame's delay silently eats it — this is what made starting a fence
+  feel broken. `beginEdit` and the caret restore after a rebuild both call the focus path directly and
+  fall back to a deferred attempt only when the row's delegate is not instantiated yet. A keystroke typed
+  inside the round trip of a split — before the new block exists — is still dropped; at human typing speed
+  the split has landed.
 - **Markdown is applied as text formats, never as content.** A `QSyntaxHighlighter` is attached to each
   block editor's document and rescans that document's own text on every change, so a link still being
   typed is already styled and nothing waits for the debounced save. Formats carry the resolved weight,
@@ -205,9 +211,10 @@ a block, scrolling the column to its end to pull in an older chunk, Ctrl+Enter t
 Ctrl+Shift+S then Enter to schedule it, clicking the agenda checkbox to complete it, typing
 `[[My Project]]` to create and link a page, opening that page from the switcher, expanding its unlinked
 mentions, typing `**bold**` and `code` and reading back the *formats* the editor applied, leaving the block
-to see it render and clicking it to see its marks come back, building a ```mermaid fence with plain Enter
-once it is open and checking the diagram it drew, a fence that does not parse and the one line it reports,
-and finally a close with a pending debounce. Each step is checked against the
+to see it render and clicking it to see its marks come back, typing immediately after that click and again
+after Enter to prove no keystroke is eaten, typing ``` in a fresh block to start a code block, building the
+fence with plain Enter once it is open and checking the diagram it drew, a fence that does not parse and the
+one line it reports, and finally a close with a pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 
