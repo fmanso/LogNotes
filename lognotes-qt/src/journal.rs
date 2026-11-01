@@ -15,7 +15,9 @@ use std::thread;
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QModelIndex, QString, QVariant};
 use lognotes_core::markdown::{self, LinkKind};
-use lognotes_core::{AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, Store};
+use lognotes_core::{
+    AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, SearchResults, Store,
+};
 
 use crate::diagram::{Diagrams, Drawn};
 use qobject::{Journal, QHash_i32_QByteArray, Role};
@@ -32,6 +34,10 @@ const CHUNK_DAYS: u32 = 14;
 
 /// How far ahead the agenda looks. The rule itself lives in `lognotes`.
 const AGENDA_HORIZON_DAYS: u32 = 7;
+
+/// How many page names and how many blocks the quick switcher shows for one query.
+const SEARCH_PAGES: usize = 5;
+const SEARCH_BLOCKS: usize = 20;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -81,6 +87,8 @@ pub mod qobject {
         #[qproperty(bool, can_undo)]
         #[qproperty(bool, can_redo)]
         #[qproperty(u64, revision)]
+        #[qproperty(QString, hits)]
+        #[qproperty(i32, focus_row)]
         type Journal = super::JournalRust;
 
         #[cxx_override]
@@ -161,6 +169,26 @@ pub mod qobject {
         /// the marks removed, so a click there has to be translated back before the editor takes it.
         #[qinvokable]
         fn raw_position(self: Pin<&mut Self>, text: &QString, shown: i32) -> i32;
+
+        /// Run the quick switcher's query: pages by name, then blocks by their text. The answer arrives
+        /// in `search_results` with `search_revision` bumped, rather than as a return value, because the
+        /// store lives on the worker thread.
+        #[qinvokable]
+        fn search(self: Pin<&mut Self>, query: &QString);
+
+        /// Show the place a search hit names and put the caret in that block. `journal_date` is empty for
+        /// a block on a named page; `page_name` is the page to open otherwise.
+        #[qinvokable]
+        fn open_block(
+            self: Pin<&mut Self>,
+            block_id: i32,
+            page_name: &QString,
+            journal_date: &QString,
+        );
+
+        /// Consumed once the view has moved the caret to `focus_row`.
+        #[qinvokable]
+        fn clear_focus_row(self: Pin<&mut Self>);
 
         /// The named pages, as a JSON array of strings, for the page switcher.
         #[qinvokable]
@@ -248,6 +276,13 @@ pub struct JournalRust {
     /// Bumped on every applied snapshot. QML restores the caret from this: the row count alone does not
     /// change when a block is merely edited, so `countChanged` cannot be the trigger.
     revision: u64,
+    /// The last search answer, as `{"error": "…", "hits": […]}`. Its own signal is what tells the view
+    /// to rebuild, so no counter is needed.
+    hits: QString,
+    /// A block a search asked for, to be turned into a row once a snapshot containing it arrives.
+    pending_focus: i32,
+    /// The row the view should put the caret in, or -1.
+    focus_row: i32,
 }
 
 enum Command {
@@ -265,6 +300,8 @@ enum Command {
 }
 
 enum Job {
+    /// The quick switcher's query: no snapshot, just an answer.
+    Search { query: String, queue: CxxQtThread<Journal> },
     Start {
         dates: Vec<String>,
         mode: Mode,
@@ -567,6 +604,48 @@ impl qobject::Journal {
         QString::from(target.as_str())
     }
 
+    fn search(mut self: Pin<&mut Self>, query: &QString) {
+        if self.worker.is_none() {
+            return;
+        }
+        let queue = self.as_mut().qt_thread();
+        self.send(Job::Search {
+            query: query.to_string(),
+            queue,
+        });
+    }
+
+    fn open_block(
+        mut self: Pin<&mut Self>,
+        block_id: i32,
+        page_name: &QString,
+        journal_date: &QString,
+    ) {
+        let date = journal_date.to_string();
+        let name = page_name.to_string();
+        if !date.is_empty() {
+            // A journalled block: load the chunk that ends on its day, as if the column had scrolled there.
+            let mut rust = self.as_mut().rust_mut();
+            rust.mode = Mode::Journal;
+            rust.dates = chunk_from(&date, CHUNK_DAYS);
+        } else if !name.trim().is_empty() {
+            self.as_mut().rust_mut().mode = Mode::Page(name);
+        } else {
+            return;
+        }
+        self.as_mut().rust_mut().pending_focus = block_id;
+        self.as_mut().dispatch(None);
+    }
+
+    fn clear_focus_row(mut self: Pin<&mut Self>) {
+        self.as_mut().set_focus_row(-1);
+    }
+
+    /// Called on the GUI thread when a search answer arrives.
+    fn apply_search(mut self: Pin<&mut Self>, json: String) {
+        self.as_mut().set_hits(QString::from(json.as_str()));
+    }
+
     fn page_names(self: Pin<&mut Self>) -> QString {
         // Read on the GUI thread from the worker would need a round trip; the model keeps the last
         // known list instead, refreshed with every snapshot.
@@ -606,6 +685,8 @@ impl qobject::Journal {
         }
 
         self.as_mut().begin_reset_model();
+        let pending = self.pending_focus;
+        let mut focus = -1;
         {
             let agenda = agenda_rows(&outcome.agenda);
             let mut rows = Vec::new();
@@ -613,7 +694,9 @@ impl qobject::Journal {
                 rows.push(page_header(name));
                 rows.extend(day_rows(name, blocks, &outcome.diagrams).into_iter().skip(1));
                 rows.extend(reference_rows(references));
+                focus = row_of_block(&rows, pending);
                 let mut rust = self.as_mut().rust_mut();
+                rust.pending_focus = -1;
                 rust.rows = rows;
                 rust.can_undo = outcome.can_undo;
                 rust.can_redo = outcome.can_redo;
@@ -624,6 +707,7 @@ impl qobject::Journal {
                 self.as_mut().set_ready(true);
                 self.as_mut().set_can_undo(outcome.can_undo);
                 self.as_mut().set_can_redo(outcome.can_redo);
+                self.as_mut().set_focus_row(focus);
                 self.as_mut().bump_revision();
                 return;
             }
@@ -638,7 +722,9 @@ impl qobject::Journal {
                 rows.extend(agenda.iter().cloned());
             }
 
+            focus = row_of_block(&rows, pending);
             let mut rust = self.as_mut().rust_mut();
+            rust.pending_focus = -1;
             rust.rows = rows;
             rust.can_undo = outcome.can_undo;
             rust.can_redo = outcome.can_redo;
@@ -650,6 +736,7 @@ impl qobject::Journal {
         self.as_mut().set_ready(outcome.ready);
         self.as_mut().set_can_undo(outcome.can_undo);
         self.as_mut().set_can_redo(outcome.can_redo);
+        self.as_mut().set_focus_row(focus);
         self.as_mut().bump_revision();
     }
 
@@ -693,6 +780,16 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         },
                     ),
                 }
+            }
+            Job::Search { query, queue } => {
+                let json = match store.as_ref() {
+                    Some(store) => match store.search(&query, SEARCH_PAGES, SEARCH_BLOCKS) {
+                        Ok(results) => search_json(&results),
+                        Err(error) => search_failed(&error.to_string()),
+                    },
+                    None => search_failed("the database is not open"),
+                };
+                let _ = queue.queue(move |mut journal: Pin<&mut Journal>| journal.apply_search(json));
             }
             Job::Flush { command, done } => {
                 if let Some(store) = store.as_mut() {
@@ -998,6 +1095,71 @@ fn reference_row(entry: &ReferenceRow, kind: Kind) -> Row {
         diagram: String::new(),
         diagram_error: String::new(),
     }
+}
+
+/// The row holding `block_id`, or -1 when this snapshot does not contain it.
+fn row_of_block(rows: &[Row], block_id: i32) -> i32 {
+    if block_id < 0 {
+        return -1;
+    }
+    rows.iter()
+        .position(|row| row.block_id == block_id)
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
+/// A search answer the view can read: `{"error": "", "hits": […]}`. A failed query says so instead of
+/// looking like "nothing found".
+fn search_failed(error: &str) -> String {
+    format!("{{\"error\":{},\"hits\":[]}}", json_string(error))
+}
+
+fn search_json(results: &SearchResults) -> String {
+    let mut hits: Vec<String> = Vec::new();
+
+    for page in &results.pages {
+        hits.push(format!(
+            "{{\"kind\":\"page\",\"title\":{},\"where\":\"page\",\"blockId\":-1,\"page\":{},\"date\":\"\"}}",
+            json_string(&page.name),
+            json_string(&page.name)
+        ));
+    }
+
+    for hit in &results.blocks {
+        let where_ = hit
+            .journal_date
+            .clone()
+            .unwrap_or_else(|| hit.page_name.clone());
+        hits.push(format!(
+            "{{\"kind\":\"block\",\"title\":{},\"where\":{},\"blockId\":{},\"page\":{},\"date\":{}}}",
+            // The block's text is rendered here as it is everywhere else it is read: marks gone.
+            json_string(&markdown::to_html(&hit.snippet)),
+            json_string(&where_),
+            hit.block.id,
+            json_string(&hit.page_name),
+            json_string(hit.journal_date.as_deref().unwrap_or(""))
+        ));
+    }
+
+    format!("{{\"error\":\"\",\"hits\":[{}]}}", hits.join(","))
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if (other as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", other as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn page_names_json(store: &Store) -> String {

@@ -112,6 +112,23 @@ pub struct BlockRow {
     pub collapsed: bool,
 }
 
+/// One block a search matched, with where it lives and the window of text that matched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockHit {
+    pub block: BlockRow,
+    pub page_name: String,
+    pub journal_date: Option<String>,
+    /// A window of the block's text around the match, as stored — marks and all. The view renders it.
+    pub snippet: String,
+}
+
+/// What the quick switcher found: pages by name first, then blocks by their text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchResults {
+    pub pages: Vec<Page>,
+    pub blocks: Vec<BlockHit>,
+}
+
 /// A journal day as the column renders it. `page_id` is `None` when the day has never been written to —
 /// reading a day must not create it, or scrolling into the past would fill the database with empty pages.
 #[derive(Debug, Clone, PartialEq)]

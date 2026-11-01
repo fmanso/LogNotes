@@ -445,6 +445,54 @@ pub fn run() -> ! {
         format!("error={error:?}"),
     );
 
+    // ---- search -----------------------------------------------------------------------------
+    // Ctrl+K over the whole graph: pages by name first, then blocks by their text.
+    driver::press_key(key::K, modifier::CTRL);
+    driver::wait_ms(500);
+    check(
+        "ctrl+k opens the search field",
+        driver::focus_name().to_string() == "searchField",
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+
+    driver::type_text(&QString::from("Project"));
+    driver::wait_ms(800);
+    shot("24-search");
+    check(
+        "typing finds the page and the blocks that mention it",
+        driver::search_count() >= 2,
+        format!("hits={}", driver::search_count()),
+    );
+
+    // The page ranks first, so Enter opens it.
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(900);
+    shot("25-search-opened-page");
+    let opened_page_rows = driver::row_count();
+    check(
+        "enter opens the page the first hit names",
+        opened_page_rows > 0 && opened_page_rows < 20,
+        format!("rows={opened_page_rows}"),
+    );
+
+    // A block hit opens the block itself, with the caret in it.
+    driver::press_key(key::K, modifier::CTRL);
+    driver::wait_ms(400);
+    // "world" appears only in block text, so the first hit is a block — and it is still one word, unlike
+    // "matters", which an earlier step of this run split with a ~.
+    driver::type_text(&QString::from("world"));
+    driver::wait_ms(800);
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(900);
+    driver::type_text(&QString::from("Q"));
+    driver::wait_ms(800);
+    shot("26-search-opened-block");
+    check(
+        "a block hit opens that block with the caret on the match",
+        blocks(&root).iter().any(|block| block.contains("Qworld")),
+        format!("blocks={:?}", blocks(&root)),
+    );
+
     // Leave the caret where the close test expects it: at the end of the first block.
     driver::click_block(0);
     driver::wait_ms(300);

@@ -123,6 +123,8 @@ cursor is worse than one that lingers.
 | `pages()` | Every `kind = 'page'` page, ordered by `name_key` — the page switcher's list. Journal days are excluded: they are reached by scrolling, not by name. |
 | `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
+| `search(query, page_limit, block_limit)` | `SearchResults`: pages whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date and a window of its text around the match. |
+| `page_of_block(block)` | The page a block belongs to — what the view needs to show a block a search found. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
 | `references(page)` | Explicit references from `block_link`, plus plain mentions from `block_fts` matched on `name_key` as whole words and excluding blocks already listed. |
@@ -232,3 +234,8 @@ escaping (a note containing markup shows that markup), dropped marks, one line p
 `page:`/URL hrefs; `to_html_block` for keeping a fence's lines. `link_at` resolves a click to the link
 under it, `in_fence` covers both edges of a fence and one that was never closed, and `raw_position` maps a
 rendered caret back past the marks, in UTF-16 units and across an emoji.
+
+`search` has its own file: page ranking (exact, prefix, anywhere, capped, journals excluded), a half-typed
+word already matching block text, a block hit naming the page it lives on, an empty answer for a query that
+matches nothing, a long block shown as a window around the match, and a query full of punctuation that must
+answer rather than fail — the query is quoted, so none of it becomes FTS syntax.

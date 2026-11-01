@@ -11,7 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Error, Result};
 use crate::model::{
-    AgendaRow, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind, ReferenceRow,
+    AgendaRow, BlockHit, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind,
+    ReferenceRow, SearchResults,
 };
 use crate::order::key_between;
 use crate::text::{extract_links, mentions_whole_words};
@@ -462,6 +463,73 @@ impl Store {
     ///
     /// Mentions come from the full-text index, minus the blocks that already link, and are matched on
     /// whole words so a page called "Pla" is not "found" inside "Plastic".
+    /// The quick switcher's query: pages whose name contains `query`, then blocks whose text matches it.
+    ///
+    /// Pages rank exact name, then prefix, then anywhere, alphabetical within a rank. Blocks are ranked by
+    /// FTS5's bm25 over `block_fts` — the index exists for exactly this — and queried as a phrase with a
+    /// prefix on its last word, so a half-typed word already matches. Both are capped: this feeds a list,
+    /// not an archive.
+    pub fn search(&self, query: &str, page_limit: usize, block_limit: usize) -> Result<SearchResults> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(SearchResults::default());
+        }
+        let needle = trimmed.to_lowercase();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, name_key, kind, journal_date FROM page
+             WHERE kind = 'page' AND instr(name_key, ?1) > 0
+             ORDER BY CASE WHEN name_key = ?1 THEN 0
+                           WHEN instr(name_key, ?1) = 1 THEN 1
+                           ELSE 2 END,
+                      name_key
+             LIMIT ?2",
+        )?;
+        let pages = stmt
+            .query_map(params![needle, page_limit as i64], read_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Quoted, so the query is a phrase and its punctuation cannot become syntax.
+        let fts_query = format!("\"{}\"*", trimmed.replace('"', ""));
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.parent_id, b.order_key, b.content, b.marker, b.scheduled_date, b.collapsed,
+                    p.name, p.journal_date
+             FROM block_fts f
+             JOIN block b ON b.id = f.rowid
+             JOIN page p ON p.id = b.page_id
+             WHERE block_fts MATCH ?1
+             ORDER BY bm25(block_fts)
+             LIMIT ?2",
+        )?;
+        let blocks = stmt
+            .query_map(params![fts_query, block_limit as i64], |row| {
+                let block = read_block_row(row, 0)?;
+                Ok(BlockHit {
+                    snippet: snippet(&block.content, &needle),
+                    block,
+                    page_name: row.get(7)?,
+                    journal_date: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(SearchResults { pages, blocks })
+    }
+
+    /// The page a block belongs to — what the view needs to show a block a search found.
+    pub fn page_of_block(&self, block_id: i64) -> Result<Page> {
+        self.conn
+            .query_row(
+                "SELECT p.id, p.name, p.name_key, p.kind, p.journal_date
+                 FROM page p JOIN block b ON b.page_id = p.id
+                 WHERE b.id = ?1",
+                [block_id],
+                read_page,
+            )
+            .optional()?
+            .ok_or(Error::NotFound(block_id))
+    }
+
     pub fn references(&self, page_id: i64) -> Result<Vec<ReferenceRow>> {
         let page = self.page(page_id)?;
         let mut out = Vec::new();
@@ -941,6 +1009,32 @@ fn push_rows(
         });
         push_rows(raw, by_parent, Some(row.0), depth + 1, out);
     }
+}
+
+/// A window of `text` around the first match of `needle`, cut at character boundaries and marked with
+/// ellipses where it was cut.
+fn snippet(text: &str, needle: &str) -> String {
+    const WINDOW: usize = 60;
+
+    let start = text.to_lowercase().find(needle).unwrap_or(0);
+    let mut from = start.saturating_sub(WINDOW / 2);
+    while from > 0 && !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = (start + needle.len() + WINDOW / 2).min(text.len());
+    while to < text.len() && !text.is_char_boundary(to) {
+        to += 1;
+    }
+
+    let mut out = String::new();
+    if from > 0 {
+        out.push('…');
+    }
+    out.push_str(text[from..to].trim());
+    if to < text.len() {
+        out.push('…');
+    }
+    out
 }
 
 fn read_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {

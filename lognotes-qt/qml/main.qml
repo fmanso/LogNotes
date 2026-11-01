@@ -29,6 +29,13 @@ ApplicationWindow {
     // window closes: the process exits before the timer fires.
     property var unsaved: ({})
 
+    // The quick switcher: one field over the whole graph. `searchHits` is rebuilt from the model's JSON
+    // answer, and `searchMessage` is empty unless there is something to say.
+    property int searchSelected: -1
+    property string searchMessage: ""
+    // Where the block hits start, so the list can label its two groups.
+    property int searchFirstBlock: -1
+
     // The one block currently in edit mode; every other block shows its markdown rendered. It lives on
     // the window rather than on a delegate because delegates are rebuilt after every save.
     property int editingRow: -1
@@ -96,9 +103,52 @@ ApplicationWindow {
             }
         }
 
+        function onHitsChanged() {
+            let body = { error: "", hits: [] }
+            try {
+                body = JSON.parse(journal.hits)
+            } catch (error) {
+                body = { error: qsTr("The search answer could not be read."), hits: [] }
+            }
+
+            searchModel.clear()
+            for (const hit of body.hits) {
+                searchModel.append(hit)
+            }
+            root.searchSelected = searchModel.count > 0 ? 0 : -1
+            root.searchFirstBlock = -1
+            for (let i = 0; i < searchModel.count; i++) {
+                if (searchModel.get(i).kind === "block") {
+                    root.searchFirstBlock = i
+                    break
+                }
+            }
+            root.searchMessage = body.error !== ""
+                    ? body.error
+                    : (searchModel.count === 0 && searchField.text.trim() !== ""
+                       ? qsTr("Nothing matches “%1”").arg(searchField.text) : "")
+        }
+
         function onRevisionChanged() {
             root.rebuilding = false
             root.refreshPages()
+            // A search hit asked for the caret to be put in a block: this snapshot has the row, so put
+            // the caret on the match rather than at the start of the block.
+            if (journal.focus_row >= 0) {
+                const row = journal.focus_row
+                journal.clear_focus_row()
+                let caret = 0
+                const term = searchField.text.trim().toLowerCase()
+                if (term !== "") {
+                    const item = list.itemAtIndex(row)
+                    const text = item && item.blockEditor ? item.blockEditor.text.toLowerCase() : ""
+                    const at = text.indexOf(term)
+                    if (at >= 0) {
+                        caret = at
+                    }
+                }
+                root.beginEdit(row, caret)
+            }
             if (root.pendingViewFocus) {
                 root.pendingViewFocus = false
                 root.beginEdit(root.firstBlockRow(), 0)
@@ -201,6 +251,63 @@ ApplicationWindow {
     function formatDay(iso) {
         if (!iso) return ""
         return Qt.formatDate(new Date(iso + "T12:00:00"), "MMM d")
+    }
+
+    ListModel {
+        id: searchModel
+    }
+
+    // ---- the quick switcher ------------------------------------------------------------------
+    // Ctrl+K over anything: page names first, then blocks whose text matches.
+    Shortcut {
+        sequences: ["Ctrl+K"]
+        onActivated: root.openSearch()
+    }
+
+    function openSearch() {
+        searchField.text = ""
+        searchModel.clear()
+        root.searchSelected = -1
+        root.searchMessage = ""
+        searchPopup.open()
+        searchField.forceActiveFocus()
+    }
+
+    function searchMove(step) {
+        if (searchModel.count === 0) {
+            return
+        }
+        root.searchSelected = (root.searchSelected + step + searchModel.count) % searchModel.count
+        searchList.positionViewAtIndex(root.searchSelected, ListView.Contain)
+    }
+
+    function searchActivate(index) {
+        if (index < 0 || index >= searchModel.count) {
+            return
+        }
+        const hit = searchModel.get(index)
+        searchPopup.close()
+        if (hit.kind === "page") {
+            root.openLink("page:" + hit.page)
+        } else {
+            root.rebuilding = true
+            journal.open_block(hit.blockId, hit.page, hit.date)
+        }
+    }
+
+    // Where a hit lives: a page's name, a day's date, or "today".
+    function searchWhere(hit) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(hit.where)) {
+            return hit.where
+        }
+        const today = Qt.formatDate(new Date(), "yyyy-MM-dd")
+        return hit.where === today ? qsTr("today") : formatDay(hit.where)
+    }
+
+    Timer {
+        id: searchDebounce
+        interval: 120
+        onTriggered: journal.search(searchField.text)
     }
 
     // One place decides what following a link means: a page link opens that page, anything else leaves
@@ -469,6 +576,190 @@ ApplicationWindow {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    Popup {
+        id: searchPopup
+        objectName: "searchPopup"
+        parent: Overlay.overlay
+        // A Popup is not an Item: it has x/y, not anchors, so it is centred by arithmetic.
+        x: Math.round((root.width - width) / 2)
+        y: 64
+        width: Math.min(560, root.width - 80)
+        padding: 0
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        Overlay.modal: Rectangle {
+            color: "#3c3223"
+            opacity: 0.08
+        }
+
+        background: Rectangle {
+            color: "#faf9f7"
+            border.color: "#ddd8ce"
+            radius: 10
+        }
+
+        contentItem: Column {
+            spacing: 0
+
+            Item {
+                width: parent.width
+                height: 46
+
+                TextInput {
+                    id: searchField
+                    objectName: "searchField"
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 14
+                    verticalAlignment: TextInput.AlignVCenter
+                    color: "#242424"
+                    font.pixelSize: 15
+                    selectByMouse: true
+                    // No `focus: true`: an item inside a closed popup still takes the window's focus at
+                    // startup and leaves the column with none. The overlay focuses it when it opens.
+                    onTextChanged: searchDebounce.restart()
+
+                    Keys.onPressed: (event) => {
+                        if (event.key === Qt.Key_Down) {
+                            root.searchMove(1)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Up) {
+                            root.searchMove(-1)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                            root.searchActivate(root.searchSelected)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Escape) {
+                            searchPopup.close()
+                            event.accepted = true
+                        }
+                    }
+                }
+
+                // A plain TextInput has no placeholder, so the hint is its own label underneath it.
+                Label {
+                    anchors.left: parent.left
+                    anchors.leftMargin: 14
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: searchField.text === ""
+                    text: qsTr("Search pages and notes…")
+                    color: "#a39c90"
+                    font.pixelSize: 15
+                }
+
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: 1
+                    color: "#ece7de"
+                }
+            }
+
+            ListView {
+                id: searchList
+                objectName: "searchList"
+                width: parent.width
+                height: {
+                    // Each group's first row carries a small heading above it.
+                    let total = 0
+                    for (let i = 0; i < searchModel.count; i++) {
+                        total += 30 + ((i === 0 || i === root.searchFirstBlock) ? 20 : 0)
+                    }
+                    return Math.min(320, total)
+                }
+                model: searchModel
+                clip: true
+                interactive: false
+                boundsBehavior: Flickable.StopAtBounds
+
+                delegate: Item {
+                    width: searchList.width
+                    height: 30 + (labelsGroup ? 20 : 0)
+                    property bool labelsGroup: index === 0 || index === root.searchFirstBlock
+
+                    Label {
+                        id: groupLabel
+                        visible: parent.labelsGroup
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.leftMargin: 14
+                        height: 20
+                        verticalAlignment: Text.AlignBottom
+                        text: model.kind === "page" ? qsTr("Pages") : qsTr("Blocks")
+                        color: "#8a857c"
+                        font.pixelSize: 10
+                        font.capitalization: Font.AllUppercase
+                        font.letterSpacing: 0.4
+                    }
+
+                    Rectangle {
+                        id: rowBody
+                        anchors.top: parent.labelsGroup ? groupLabel.bottom : parent.top
+                        width: parent.width
+                        height: 30
+                        color: index === root.searchSelected ? "#ece7de" : "transparent"
+
+                        Label {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.leftMargin: 14
+                            anchors.right: hitWhere.left
+                            anchors.rightMargin: 10
+                            // A block hit is already rendered from the scan; a page name is a plain name.
+                            text: model.title
+                            textFormat: model.kind === "block" ? Text.RichText : Text.PlainText
+                            color: "#242424"
+                            font.pixelSize: 14
+                            elide: Text.ElideRight
+                        }
+
+                        Label {
+                            id: hitWhere
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            text: model.kind === "page" ? qsTr("page") : root.searchWhere(model)
+                            color: "#8a857c"
+                            font.pixelSize: 12
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: root.searchSelected = index
+                            onClicked: root.searchActivate(index)
+                        }
+                    }
+                }
+            }
+
+            Label {
+                visible: root.searchMessage !== ""
+                width: parent.width - 28
+                x: 14
+                topPadding: 10
+                bottomPadding: 12
+                text: root.searchMessage
+                color: "#7a3a3a"
+                font.pixelSize: 13
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+            }
+
+            Label {
+                visible: root.searchMessage === "" && searchModel.count > 0
+                width: parent.width - 28
+                x: 14
+                topPadding: 8
+                bottomPadding: 10
+                text: qsTr("↑↓ to move · Enter to open · Esc to close")
+                color: "#a39c90"
+                font.pixelSize: 11
             }
         }
     }

@@ -46,6 +46,9 @@ bool lognotes_click_named(const QString& name, int index);
 // or an empty string. How a rendered summary row and a drawn diagram are checked.
 QString lognotes_named_text(const QString& name, int index);
 
+// How many rows the quick switcher is showing, or -1 when it is not open.
+int lognotes_search_count();
+
 // Puts the column at its end, which is what pulls in an older chunk. Qt Quick ignores synthetic wheel
 // events under this compositor, so the harness drives the same end-of-column path directly.
 bool lognotes_scroll_to_end();

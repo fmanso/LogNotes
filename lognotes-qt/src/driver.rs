@@ -37,6 +37,8 @@ mod ffi {
         fn lognotes_click_named(name: &QString, index: i32) -> bool;
         #[rust_name = "named_text"]
         fn lognotes_named_text(name: &QString, index: i32) -> QString;
+        #[rust_name = "search_count"]
+        fn lognotes_search_count() -> i32;
         #[rust_name = "scroll_to_end"]
         fn lognotes_scroll_to_end() -> bool;
         #[rust_name = "close_window"]
@@ -62,6 +64,7 @@ pub mod key {
     // Qt::Key_Home/Key_End sit at 0x01000010/0x01000011 — 0x01000007 is Delete.
     pub const END: i32 = 0x0100_0011;
     pub const S: i32 = 0x53;
+    pub const K: i32 = 0x4B;
 }
 
 pub mod modifier {

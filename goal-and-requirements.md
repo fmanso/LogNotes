@@ -51,6 +51,8 @@ application small enough to fully own and trim.
   layout. An item stays listed until it is marked `DONE`, and disappears immediately once it is. *(The
   7-day horizon reads "like a week before hand" — unconfirmed as an exact number. That overdue items stay
   listed is inferred from "if marked as DONE it should disappear" — unconfirmed.)*
+- **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names first, then blocks whose
+  text matches, as you type. `Enter` opens the page, or puts the caret on the match in the block it found.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the
   app works fully offline with no account.
 

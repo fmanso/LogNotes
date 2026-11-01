@@ -263,6 +263,19 @@ QString lognotes_named_text(const QString& name, int index) {
     return item->property("source").toString();
 }
 
+int lognotes_search_count() {
+    auto* w = window();
+    if (!w) {
+        return -1;
+    }
+    QList<QQuickItem*> matches;
+    collect_named(w->contentItem(), QStringLiteral("searchList"), matches);
+    if (matches.isEmpty()) {
+        return -1;
+    }
+    return matches.first()->property("count").toInt();
+}
+
 bool lognotes_scroll_to_end() {
     auto* w = window();
     if (!w) {

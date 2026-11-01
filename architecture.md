@@ -68,6 +68,11 @@ The rejected alternatives are what make this the decision it is — a rich-text 
 styled copy of the text, would each give the app two truths about a block that can drift apart, and put
 the caret and the saved text at the mercy of a renderer.
 
+**Search is a query, not a screen.** The quick switcher asks core for pages whose name matches and blocks
+whose text does; the ranking — exact name, then prefix, then FTS5's bm25 over the one full-text index —
+lives beside the data, and the view only draws the rows. That index was already there for plain mentions,
+so search added a query rather than a second way to look at the graph.
+
 **A diagram is derived data with a name.** A ```mermaid fence is rendered to SVG on the worker thread and
 cached in the OS temp directory under a hash of its own content, so a snapshot — which happens after every
 edit anywhere — redraws nothing that has not changed, and a wiped cache costs one redraw.

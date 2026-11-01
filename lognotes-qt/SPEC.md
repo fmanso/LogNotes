@@ -57,6 +57,10 @@ Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `
 `overdue`, `html`, `diagram`, `diagramError`. Dates stay ISO `YYYY-MM-DD` in the
 model and are formatted in QML — the core never learns a locale, and the view never parses a date.
 
+Two more properties belong to the quick switcher rather than to a row: `hits` is the last search answer as
+`{"error": "…", "hits": […]}` (its own change signal is what rebuilds the list, so no counter is needed),
+and `focus_row` is the row a search hit asked the caret to go to, -1 when none.
+
 Two of those roles carry rendering rather than data: `html` is a read-only row's text already rendered
 from the same scan the editor styles with (marks dropped, links carrying `page:` or a URL), and `diagram`
 is the `file://` URL of the SVG drawn for that block's fence, with `diagramError` holding one line when
@@ -174,6 +178,12 @@ and it keeps the database path the only OS-specific location in the codebase.
   rescans the *editor's* text rather than the stored one, so an unsaved link is clickable too. One
   function, `openLink`, decides what a `page:` href or a URL does, for the editor and for read-only rows
   alike.
+- **Search is one overlay over the whole graph.** `Ctrl+K` opens a modal with one field; typing asks core
+  (120 ms after the last keystroke) and the answer lands in `hits`, which QML turns into a `ListModel` of
+  page hits and then block hits, each with where it lives — `today`, a date, or a page name. `Up`/`Down`
+  and `Enter` drive it, `Esc` closes it. Opening a block hit asks for its page or day and for the caret to
+  go to `focus_row`; the caret is then put on the match by looking for the query in that row's text, since
+  core returns where the block is, not where in the block the words are.
 - **One button style, one popup palette.** `QuietButton` is the window's only button: an outlined control in
   the page's own colours. The Pages popup and the date picker are cream panels with a hairline border and a
   tinted hover row, because the control style's default chrome is dark and the text drawn on it was
@@ -221,7 +231,8 @@ mentions, typing `**bold**` and `code` and reading back the *formats* the editor
 to see it render and clicking it to see its marks come back, typing immediately after that click and again
 after Enter to prove no keystroke is eaten, typing ``` in a fresh block to start a code block, building the
 fence with plain Enter once it is open and checking the diagram it drew, a fence that does not parse and the
-one line it reports, and finally a close with a pending debounce. Each step is checked against the
+one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, and finally a close with a pending
+debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 
@@ -239,10 +250,9 @@ Qt key codes are a trap worth stating once: `0x01000007` is Delete, not End (`0x
 constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
-not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes one
-reader: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
-diagram's URL). Its block helpers address a row and then pick the view inside it, because a block may be
-showing either the editor or its rendered form, and a row with a diagram is far taller than its text. It
-activates its window on attach, because an input method only delivers to an active one. Formatting has to be checked
-that way because a highlighter writes to the block's *layout*, not to the document's character formats, and
-a screenshot alone cannot tell a passing render from a lucky one.
+not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
+readers: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
+diagram's URL) and how many rows the quick switcher is showing (`search_count`). Its block helpers address a
+row and then pick the view inside it, because a block may be showing either the editor or its rendered form,
+and a row with a diagram is far taller than its text. It activates its window on attach, because an input
+method only delivers to an active one.
