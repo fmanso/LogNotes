@@ -77,6 +77,10 @@ pub struct LinkRef {
 pub struct Fence {
     pub lang: String,
     pub code: String,
+    /// Where the opening delimiter's line starts, so a caret anywhere from there on is "inside".
+    pub open_start: usize,
+    /// Where the closing delimiter's line starts, and `None` while the fence is still open.
+    pub close_start: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -105,7 +109,8 @@ pub fn scan(text: &str) -> Scan {
         if open.is_some() {
             if line.trim_start().starts_with("```") {
                 out.push(start, end, Style::DIM);
-                if let Some(done) = open.take() {
+                if let Some(mut done) = open.take() {
+                    done.close_start = Some(start);
                     out.fences.push(done);
                 }
             } else if !line.is_empty() {
@@ -124,6 +129,8 @@ pub fn scan(text: &str) -> Scan {
             open = Some(Fence {
                 lang: trimmed[3..].trim().to_string(),
                 code: String::new(),
+                open_start: start,
+                close_start: None,
             });
             continue;
         }
@@ -146,6 +153,69 @@ pub fn mermaid_fence(text: &str) -> Option<Fence> {
         .find(|fence| fence.lang.eq_ignore_ascii_case("mermaid"))
 }
 
+/// Whether the caret at `byte_offset` sits inside a fence — on the line that opened it or in its body,
+/// but not on the line that closes it. This is what decides whether Enter continues the code block or
+/// starts a new block.
+pub fn in_fence(text: &str, byte_offset: usize) -> bool {
+    scan(text).fences.iter().any(|fence| {
+        fence.open_start <= byte_offset && fence.close_start.is_none_or(|end| byte_offset < end)
+    })
+}
+
+/// Where a caret that a *rendered* block reports belongs in the raw text.
+///
+/// A block at rest shows its text with the syntax marks removed, so the offset the view hit-tests is
+/// counted in the shown text while the editor counts in the raw one. Both are UTF-16 units, as a Qt text
+/// document counts them.
+pub fn raw_position(text: &str, rendered: usize) -> usize {
+    let scan = scan(text);
+    let mut raw = 0;
+    let mut shown = 0;
+    let mut cursor = 0;
+
+    for span in &scan.spans {
+        if span.start > cursor {
+            let gap = &text[cursor..span.start];
+            let length = gap.encode_utf16().count();
+            if shown + length > rendered {
+                return raw + prefix_utf16(gap, rendered - shown);
+            }
+            shown += length;
+            raw += length;
+        }
+
+        let piece = &text[span.start..span.end];
+        let length = piece.encode_utf16().count();
+        if !span.style.contains(Style::DIM) {
+            if shown + length > rendered {
+                return raw + prefix_utf16(piece, rendered - shown);
+            }
+            shown += length;
+        }
+        raw += length;
+        cursor = span.end;
+    }
+
+    let tail = &text[cursor..];
+    let length = tail.encode_utf16().count();
+    if shown + length > rendered {
+        return raw + prefix_utf16(tail, rendered - shown);
+    }
+    raw + length
+}
+
+/// How many UTF-16 units the first `units` of `text` take, stopping at a character boundary.
+fn prefix_utf16(text: &str, units: usize) -> usize {
+    let mut taken = 0;
+    for character in text.chars() {
+        if taken + character.len_utf16() > units {
+            break;
+        }
+        taken += character.len_utf16();
+    }
+    taken
+}
+
 /// The link or tag covering `byte_offset`, if a click there should navigate.
 pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
     scan(text)
@@ -160,13 +230,23 @@ pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
 /// Every character of the note is escaped, so a block that contains markup shows that markup instead of
 /// becoming it.
 pub fn to_html(text: &str) -> String {
+    render(text, false)
+}
+
+/// The same rendering for a block that is not being edited: line breaks are kept, so a fence stays a
+/// block of code instead of collapsing into one line.
+pub fn to_html_block(text: &str) -> String {
+    render(text, true)
+}
+
+fn render(text: &str, keep_lines: bool) -> String {
     let scan = scan(text);
     let mut html = String::new();
     let mut cursor = 0;
 
     for span in &scan.spans {
         if span.start > cursor {
-            escape_into(&mut html, &text[cursor..span.start]);
+            escape_into(&mut html, &text[cursor..span.start], keep_lines);
         }
         if !span.style.contains(Style::DIM) {
             let href = scan
@@ -174,14 +254,25 @@ pub fn to_html(text: &str) -> String {
                 .iter()
                 .find(|link| link.start <= span.start && span.end <= link.end);
             open_tags(&mut html, span.style, href);
-            escape_into(&mut html, &text[span.start..span.end]);
+            escape_into(&mut html, &text[span.start..span.end], keep_lines);
             close_tags(&mut html, span.style);
         }
         cursor = cursor.max(span.end);
     }
 
     if cursor < text.len() {
-        escape_into(&mut html, &text[cursor..]);
+        escape_into(&mut html, &text[cursor..], keep_lines);
+    }
+
+    if keep_lines {
+        // A fence's own ``` lines are dim, so dropping them leaves the break that ended them behind:
+        // trim those at the edges, but keep blank lines inside the block.
+        while let Some(rest) = html.strip_prefix("<br>") {
+            html = rest.to_string();
+        }
+        while let Some(rest) = html.strip_suffix("<br>") {
+            html = rest.to_string();
+        }
     }
 
     html
@@ -194,9 +285,9 @@ fn open_tags(html: &mut String, style: Style, href: Option<&LinkRef>) {
             // A page link and a tag both name a page, so one scheme covers them.
             Some(link) if link.kind != LinkKind::Url => {
                 html.push_str("page:");
-                escape_into(html, &link.target);
+                escape_into(html, &link.target, false);
             }
-            Some(link) => escape_into(html, &link.target),
+            Some(link) => escape_into(html, &link.target, false),
             None => {}
         }
         html.push_str("\">");
@@ -233,8 +324,8 @@ fn close_tags(html: &mut String, style: Style) {
     }
 }
 
-/// One line of a note: a newline becomes a space, so a multi-line block still reads as a summary.
-fn escape_into(html: &mut String, text: &str) {
+/// A newline becomes a space in a summary row, and a line break in a block at rest.
+fn escape_into(html: &mut String, text: &str, keep_lines: bool) {
     for character in text.chars() {
         match character {
             '&' => html.push_str("&amp;"),
@@ -242,6 +333,7 @@ fn escape_into(html: &mut String, text: &str) {
             '>' => html.push_str("&gt;"),
             '"' => html.push_str("&quot;"),
             '\'' => html.push_str("&#39;"),
+            '\n' if keep_lines => html.push_str("<br>"),
             '\n' => html.push(' '),
             other => html.push(other),
         }
@@ -283,7 +375,11 @@ fn line_prefix(line: &str) -> (usize, Style) {
         hashes += 1;
     }
     if hashes > 0 && (hashes == bytes.len() || bytes[hashes] == b' ') {
-        let marker = if hashes < bytes.len() { hashes + 1 } else { hashes };
+        let marker = if hashes < bytes.len() {
+            hashes + 1
+        } else {
+            hashes
+        };
         return (marker, Style::HEADING);
     }
 
@@ -378,7 +474,9 @@ fn scan_inline(out: &mut Scan, text: &str, from: usize, to: usize, base: Style, 
                 Some(("~~", Style::STRIKE))
             } else if rest.starts_with("**") {
                 Some(("**", Style::BOLD))
-            } else if (character == '*' || character == '_') && emphasis_starts(text, i, marker_of(character)) {
+            } else if (character == '*' || character == '_')
+                && emphasis_starts(text, i, marker_of(character))
+            {
                 Some((marker_of(character), Style::ITALIC))
             } else {
                 None
@@ -517,7 +615,11 @@ mod tests {
     }
 
     fn targets(text: &str) -> Vec<String> {
-        scan(text).links.into_iter().map(|link| link.target).collect()
+        scan(text)
+            .links
+            .into_iter()
+            .map(|link| link.target)
+            .collect()
     }
 
     #[test]
@@ -598,7 +700,10 @@ mod tests {
             [("My Project", LinkKind::Page), ("idea", LinkKind::Tag)]
         );
         let page = &scan.links[0];
-        assert_eq!(&"see [[My Project]] and #idea"[page.start..page.end], "[[My Project]]");
+        assert_eq!(
+            &"see [[My Project]] and #idea"[page.start..page.end],
+            "[[My Project]]"
+        );
     }
 
     #[test]
@@ -615,8 +720,10 @@ mod tests {
 
         assert_eq!(scan.links[0].kind, LinkKind::Url);
         assert_eq!(scan.links[0].target, "https://example.com/x");
-        assert!(styles("read [the docs](https://example.com/x) first")
-            .contains(&("the docs".to_string(), Style::LINK)));
+        assert!(
+            styles("read [the docs](https://example.com/x) first")
+                .contains(&("the docs".to_string(), Style::LINK))
+        );
     }
 
     #[test]
@@ -633,9 +740,11 @@ mod tests {
         assert_eq!(scan.fences[0].lang, "mermaid");
         assert_eq!(scan.fences[0].code, "graph TD\n  A --> [[B]]\n");
         assert!(scan.links.is_empty(), "a fence's contents are code");
-        assert!(styles("```mermaid\ngraph TD\n```").iter().any(|(text, style)| {
-            text == "graph TD" && *style == Style::CODE
-        }));
+        assert!(
+            styles("```mermaid\ngraph TD\n```")
+                .iter()
+                .any(|(text, style)| { text == "graph TD" && *style == Style::CODE })
+        );
     }
 
     #[test]
@@ -679,7 +788,11 @@ mod tests {
     #[test]
     fn a_line_that_only_looks_like_a_marker_is_not_one() {
         // `#hashtag` is a tag, not a heading; `-milk` is just text.
-        assert!(styles("#hashtag").iter().all(|(_, style)| *style != Style::HEADING));
+        assert!(
+            styles("#hashtag")
+                .iter()
+                .all(|(_, style)| *style != Style::HEADING)
+        );
         assert!(styles("-milk").is_empty());
     }
 
@@ -689,8 +802,16 @@ mod tests {
         let scan = scan(text);
 
         for span in &scan.spans {
-            assert!(text.is_char_boundary(span.start), "start {} splits a character", span.start);
-            assert!(text.is_char_boundary(span.end), "end {} splits a character", span.end);
+            assert!(
+                text.is_char_boundary(span.start),
+                "start {} splits a character",
+                span.start
+            );
+            assert!(
+                text.is_char_boundary(span.end),
+                "end {} splits a character",
+                span.end
+            );
         }
         assert!(styles(text).contains(&("wörld".to_string(), Style::BOLD)));
     }
@@ -737,6 +858,73 @@ mod tests {
         assert_eq!(
             to_html("[[a\"b]]"),
             "<a href=\"page:a&quot;b\">a&quot;b</a>"
+        );
+    }
+
+    #[test]
+    fn a_fence_keeps_the_caret_inside_until_it_closes() {
+        let text = "```mermaid\ngraph TD\n  A --> B\n```";
+
+        assert!(in_fence(text, 0), "the line that opens it is inside");
+        assert!(
+            in_fence(text, text.find("graph").unwrap()),
+            "so is its body"
+        );
+        assert!(in_fence(text, text.find("A -->").unwrap()));
+        assert!(
+            !in_fence(text, text.rfind("```").unwrap()),
+            "the closing line is not"
+        );
+        assert!(!in_fence("just a note", 3));
+    }
+
+    #[test]
+    fn a_fence_that_was_never_closed_stays_open() {
+        let text = "```mermaid\ngraph TD";
+
+        assert!(in_fence(text, text.len()), "so Enter keeps adding lines");
+    }
+
+    #[test]
+    fn a_rendered_caret_maps_back_past_the_marks() {
+        let text = "**bold** and `code`";
+
+        // The shown text is "bold and code": `and` starts at 5 there and at 9 in the raw text.
+        assert_eq!(raw_position(text, 5), 9);
+        assert_eq!(
+            raw_position(text, 9),
+            14,
+            "the c of code, past its backtick"
+        );
+        assert_eq!(raw_position(text, 10), 15);
+        // A click on the first shown character lands before it — inside the marks, where that
+        // character starts.
+        assert_eq!(raw_position(text, 0), 2);
+        assert_eq!(
+            raw_position(text, usize::MAX / 2),
+            text.len(),
+            "past the end"
+        );
+    }
+
+    #[test]
+    fn the_caret_mapping_counts_utf16_units() {
+        let text = "🎉 **bold**";
+
+        // The emoji is two UTF-16 units, so `b` is at 3 in the shown text and at 5 in the raw one.
+        assert_eq!(raw_position(text, 3), 5);
+    }
+
+    #[test]
+    fn a_block_at_rest_keeps_its_line_breaks() {
+        let html = to_html_block("```mermaid\ngraph TD\n  A --> B\n```");
+
+        assert_eq!(html, "<code>graph TD</code><br><code>  A --&gt; B</code>");
+        assert_eq!(to_html_block("first\nsecond"), "first<br>second");
+        assert_eq!(
+            to_html("first\nsecond"),
+            "first second",
+            "a summary stays one line"
         );
     }
 

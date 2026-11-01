@@ -139,6 +139,13 @@ and it keeps the database path the only OS-specific location in the codebase.
   whatever was typed in the last 250 ms. The window keeps the unsaved text per row and, on close, calls
   `save_now` for each: that job carries a completion channel, so the close waits for the worker to commit
   (bounded at 2 s) instead of racing the process exit.
+- **A block has two views of one text.** At rest it is a read-only rich `TextEdit` over the `html` role —
+  the markdown rendered, marks gone — and the editable `TextEdit` is hidden. Clicking the rendered text
+  enters edit mode at the caret the click landed on, translated back into the raw text by `raw_position`
+  (the rendered text is shorter than the raw one, so the two offsets are not the same number). Moving the
+  caret away renders the block again. `editingRow` lives on the window, not on a delegate, because every
+  save rebuilds the delegates and the open block has to stay open across that.
+- **An empty block is always the editor**, since there is nothing rendered to click.
 - **Markdown is applied as text formats, never as content.** A `QSyntaxHighlighter` is attached to each
   block editor's document and rescans that document's own text on every change, so a link still being
   typed is already styled and nothing waits for the debounced save. Formats carry the resolved weight,
@@ -147,9 +154,11 @@ and it keeps the database path the only OS-specific location in the codebase.
   before a block was styled. `highlightBlock` is handed one paragraph at a time while a fence spans
   lines, so the shim passes the whole document with the paragraph's range and Rust cuts the answer down to
   it.
-- **Shift+Enter breaks the line inside the block.** Enter still splits into a new block; a fence or a
-  diagram needs a way to hold more than one line, and this is the one Logseq 0.x already has. `END` on a
-  multi-line block stops at the end of the line, so anything that means "the end of the block" has to use
+- **Enter continues a fence; elsewhere it splits the block.** With the caret inside an open fence — on the
+  line that opened it or in its body — Enter adds a line to the block, so typing ``` is all it takes to
+  start a code block; on the closing line, or outside any fence, Enter splits into a new block as before.
+  `Shift+Enter` still breaks a line anywhere, which is how the first line of a fence is started. `END` on a
+  multi-line block stops at the end of the line, so anything that means "the end of the block" uses
   `Ctrl+End`.
 - **A link in an editor needs Ctrl.** Blocks are always in edit mode, so a plain click has to keep meaning
   "put the caret here". Ctrl+click resolves the character under the pointer through `link_at`, which
@@ -171,10 +180,11 @@ broken database can never look like an empty journal.
 
 ## Known limitations
 
-- Markdown styling cannot invent glyphs: a list's `-` and a quote's `>` stay visible, dimmed, instead of
-  becoming a drawn bullet or a bar. Folding is likewise not implemented: every block renders expanded, and
-  link autocompletion when typing `[[` does not exist yet. A diagram cannot be enlarged, and it is drawn
-  in blocks only — a summary row shows the fence as code, not as a picture.
+- Markdown styling cannot invent glyphs: while a block is being edited, a list's `-` and a quote's `>` stay
+  visible, dimmed, instead of becoming a drawn bullet or a bar — they do disappear in the rendered form.
+  Folding is likewise not implemented: every block renders expanded, and link autocompletion when typing
+  `[[` does not exist yet. A diagram cannot be enlarged, and it is drawn in blocks only — a summary row
+  shows the fence as code, not as a picture.
 - Blocks cannot be reordered (only indented, outdented, created, edited, deleted).
 - The focus restoration is index-based; a keypress that changes the row count between snapshot and
   rebuild can land the caret one row off.
@@ -194,9 +204,10 @@ loads, and drives it through the real input path: typing, Enter, Tab, Shift+Tab,
 a block, scrolling the column to its end to pull in an older chunk, Ctrl+Enter to mark a block,
 Ctrl+Shift+S then Enter to schedule it, clicking the agenda checkbox to complete it, typing
 `[[My Project]]` to create and link a page, opening that page from the switcher, expanding its unlinked
-mentions, typing `**bold**` and `code` and reading back the *formats* the editor applied, Shift+Enter to
-build a ```mermaid fence in one block and checking the diagram it drew, a fence that does not parse and
-the one line it reports, and finally a close with a pending debounce. Each step is checked against the
+mentions, typing `**bold**` and `code` and reading back the *formats* the editor applied, leaving the block
+to see it render and clicking it to see its marks come back, building a ```mermaid fence with plain Enter
+once it is open and checking the diagram it drew, a fence that does not parse and the one line it reports,
+and finally a close with a pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 
@@ -215,7 +226,9 @@ constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
 not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
-readers: the text or source of a named item (`named_text`, for a rendered summary row and for a diagram's
-URL) and the formats applied to one character of an editor (`editor_format`). Formatting has to be checked
+readers: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
+diagram's URL) and the formats applied to one character of an editor (`editor_format`). Its block helpers
+address a row and then pick the view inside it, because a block may be showing either the editor or its
+rendered form, and a row with a diagram is far taller than its text. Formatting has to be checked
 that way because a highlighter writes to the block's *layout*, not to the document's character formats, and
 a screenshot alone cannot tell a passing render from a lucky one.

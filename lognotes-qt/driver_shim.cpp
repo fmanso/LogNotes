@@ -106,7 +106,7 @@ void collect_editors(QQuickItem* item, QList<QQuickItem*>& out) {
     if (!item) {
         return;
     }
-    if (item->objectName() == QLatin1String("blockEditor") && item->isVisible()) {
+    if (item->objectName() == QLatin1String("blockEditor")) {
         out.append(item);
     }
     // Walk the visual tree: ListView delegates live under the content item, not as QObject
@@ -116,22 +116,66 @@ void collect_editors(QQuickItem* item, QList<QQuickItem*>& out) {
     }
 }
 
-QList<QQuickItem*> block_editors() {
-    QList<QQuickItem*> editors;
-    if (auto* w = window()) {
-        collect_editors(w->contentItem(), editors);
+void collect_named(QQuickItem* item, const QString& name, QList<QQuickItem*>& out) {
+    if (!item) {
+        return;
     }
-    return editors;
+    if (item->objectName() == name && item->isVisible()) {
+        out.append(item);
+    }
+    for (auto* child : item->childItems()) {
+        collect_named(child, name, out);
+    }
+}
+
+// The column's block rows in document order. A row holds both views of a block — the editor and the
+// rendered text — so helpers address a row and then pick the view they need.
+QList<QQuickItem*> block_rows() {
+    QList<QQuickItem*> rows;
+    if (auto* w = window()) {
+        collect_named(w->contentItem(), QStringLiteral("blockRow"), rows);
+    }
+    QList<QQuickItem*> blocks;
+    for (auto* row : rows) {
+        if (row->property("isBlockRow").toBool()) {
+            blocks.append(row);
+        }
+    }
+    return blocks;
+}
+
+// Whichever view of the block is on screen — the editor or the rendered text. A row can be much taller
+// than its text once a diagram is drawn under it, so a click goes here, not to the row's centre.
+QQuickItem* text_surface_of(QQuickItem* row) {
+    for (const char* name : {"blockEditor", "blockRendered"}) {
+        QList<QQuickItem*> matches;
+        collect_named(row, QString::fromLatin1(name), matches);
+        if (!matches.isEmpty()) {
+            return matches.first();
+        }
+    }
+    return nullptr;
+}
+
+// A row's editor, whether or not it is the view currently on screen: its document still holds the raw
+// text and its highlighter still styles it.
+QQuickItem* editor_of(QQuickItem* row) {
+    QList<QQuickItem*> editors;
+    collect_editors(row, editors);
+    return editors.isEmpty() ? nullptr : editors.first();
 }
 } // namespace
 
 bool lognotes_click_block(int index) {
     auto* w = window();
-    const auto editors = block_editors();
-    if (!w || index < 0 || index >= editors.size()) {
+    const auto rows = block_rows();
+    if (!w || index < 0 || index >= rows.size()) {
         return false;
     }
-    auto* item = editors.at(index);
+    QQuickItem* item = text_surface_of(rows.at(index));
+    if (!item) {
+        item = rows.at(index);
+    }
     const QPointF centre = item->mapToScene(QPointF(item->width() / 2.0, item->height() / 2.0));
     const QPointF global = w->mapToGlobal(centre.toPoint());
 
@@ -145,19 +189,23 @@ bool lognotes_click_block(int index) {
 }
 
 QString lognotes_editor_text(int index) {
-    const auto editors = block_editors();
-    if (index < 0 || index >= editors.size()) {
+    const auto rows = block_rows();
+    if (index < 0 || index >= rows.size()) {
         return {};
     }
-    return editors.at(index)->property("text").toString();
+    auto* editor = editor_of(rows.at(index));
+    return editor ? editor->property("text").toString() : QString();
 }
 
 QString lognotes_editor_debug(int index) {
-    const auto editors = block_editors();
-    if (index < 0 || index >= editors.size()) {
+    const auto rows = block_rows();
+    if (index < 0 || index >= rows.size()) {
         return QStringLiteral("<none>");
     }
-    auto* item = editors.at(index);
+    auto* item = editor_of(rows.at(index));
+    if (!item) {
+        return QStringLiteral("<no editor>");
+    }
     const QPointF scene = item->mapToScene(QPointF(0, 0));
     return QStringLiteral("%1 w=%2 h=%3 at(%4,%5) visible=%6")
         .arg(item->property("text").toString())
@@ -167,20 +215,6 @@ QString lognotes_editor_debug(int index) {
         .arg(scene.y())
         .arg(item->isVisible());
 }
-
-namespace {
-void collect_named(QQuickItem* item, const QString& name, QList<QQuickItem*>& out) {
-    if (!item) {
-        return;
-    }
-    if (item->objectName() == name && item->isVisible()) {
-        out.append(item);
-    }
-    for (auto* child : item->childItems()) {
-        collect_named(child, name, out);
-    }
-}
-} // namespace
 
 bool lognotes_click_named(const QString& name, int index) {
     auto* w = window();
@@ -228,15 +262,18 @@ QString lognotes_editor_format(int index, int offset) {
     if (!w) {
         return QString();
     }
-    QList<QQuickItem*> editors;
-    collect_editors(w->contentItem(), editors);
-    if (index < 0 || index >= editors.size()) {
+    const auto rows = block_rows();
+    if (index < 0 || index >= rows.size()) {
+        return QString();
+    }
+    auto* editor = editor_of(rows.at(index));
+    if (!editor) {
         return QString();
     }
 
     // cxx-qt gives QML a QQuickTextDocument; the formats live on the QTextDocument inside it.
     auto* wrapper = qobject_cast<QQuickTextDocument*>(
-        editors.at(index)->property("textDocument").value<QObject*>());
+        editor->property("textDocument").value<QObject*>());
     if (!wrapper || !wrapper->textDocument()) {
         return QString();
     }

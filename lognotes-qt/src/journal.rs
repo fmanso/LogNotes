@@ -163,6 +163,16 @@ pub mod qobject {
         #[qinvokable]
         fn link_at(self: Pin<&mut Self>, text: &QString, position: i32) -> QString;
 
+        /// Whether `position` in `text` sits inside a code fence, which is what makes Enter add a line
+        /// to the block instead of starting a new one.
+        #[qinvokable]
+        fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool;
+
+        /// Where a caret in the *rendered* text of `text` belongs in the raw text: a block at rest shows
+        /// the marks removed, so a click there has to be translated back before the editor takes it.
+        #[qinvokable]
+        fn raw_position(self: Pin<&mut Self>, text: &QString, shown: i32) -> i32;
+
         /// The named pages, as a JSON array of strings, for the page switcher.
         #[qinvokable]
         fn page_names(self: Pin<&mut Self>) -> QString;
@@ -552,6 +562,16 @@ impl qobject::Journal {
         let _ = qobject::install_highlighter(document);
     }
 
+    fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool {
+        let text = text.to_string();
+        markdown::in_fence(&text, byte_offset(&text, position.max(0) as u32))
+    }
+
+    fn raw_position(self: Pin<&mut Self>, text: &QString, shown: i32) -> i32 {
+        let text = text.to_string();
+        markdown::raw_position(&text, shown.max(0) as usize) as i32
+    }
+
     fn link_at(self: Pin<&mut Self>, text: &QString, position: i32) -> QString {
         let text = text.to_string();
         let Some(link) = markdown::link_at(&text, byte_offset(&text, position.max(0) as u32)) else {
@@ -895,12 +915,14 @@ fn day_rows(date: &str, blocks: &[BlockRow], drawn: &HashMap<i64, Drawn>) -> Vec
             date: date.to_string(),
             block_id: block.id as i32,
             depth: block.depth,
+            // A block is shown as this until it is clicked, so it keeps its line breaks — a fence has to
+            // still read as a block of code.
+            html: markdown::to_html_block(&block.content),
             text: block.content.clone(),
             marker: block.marker,
             scheduled: block.scheduled_date.clone(),
             source: String::new(),
             overdue: false,
-            html: String::new(),
             diagram: diagram.source,
             diagram_error: diagram.error,
         }

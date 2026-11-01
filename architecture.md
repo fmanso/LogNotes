@@ -58,9 +58,11 @@ references into a link table and creates pages that don't exist yet. A block's t
 about what it links to; the link table can be dropped and rebuilt from it at any time.
 
 **Markdown is read from the text, never stored beside it.** One scanner in core turns a block's text into
-styled spans, links and fences; the editor draws those spans as text formats on its own document, a
-read-only row draws them as escaped HTML, and a diagram is drawn from the fence's own content. Styling is
-layout, not content: the characters, the undo stack and the stored markdown are exactly what they were.
+styled spans, links and fences. A block at rest draws them as escaped HTML — marks gone, links live — and
+clicking it swaps in the editor, which draws the same spans as text formats over the raw text. Styling is
+layout, not content: the characters, the undo stack and the stored markdown are exactly what they were, and
+the click that switches forms is translated from a caret in the rendered text back to the raw one rather
+than guessed.
 The rejected alternatives are what make this the decision it is — a rich-text document, or a second
 styled copy of the text, would each give the app two truths about a block that can drift apart, and put
 the caret and the saved text at the mercy of a renderer.

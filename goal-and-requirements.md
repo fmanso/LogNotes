@@ -37,11 +37,11 @@ application small enough to fully own and trim.
 - **Pages, links, tags, backlinks.** `[[page]]` links and `#tags` create and link pages; each page lists
   its linked references at the bottom, both explicit links and plain mentions, as 0.x does. *(Plain-mention
   references inferred from 0.x behavior — unconfirmed.)*
-- **Markdown, rendered where it is typed.** Bold, italic, strikethrough, inline code, headings, lists and
-  quotes are styled inside a block as it is typed, with the syntax characters left visible and dimmed; the
-  text that is stored stays markdown. `[[links]]`, `#tags` and external links are styled and followable,
-  and a ```mermaid fence draws its diagram beneath itself. Read-only rows — the agenda and the reference
-  panels — show the same text finished: marks dropped, links live.
+- **Markdown, rendered.** A block shows its text finished: bold, italic, code, headings and quotes are
+  styled, `[[links]]`, `#tags` and external links are followable, and a ```mermaid fence draws its diagram
+  beneath itself. Clicking a block swaps in the raw markdown — marks visible, dimmed — to edit it, and
+  leaving it renders again. What is stored is always the markdown. The agenda and the reference panels show
+  the same finished rendering.
 - **Tasks.** Blocks are marked `TODO`, `DOING`, or `DONE`, cycled by a shortcut. *(`DOING` inferred from
   0.x task markers — unconfirmed; `DONE` is confirmed.)*
 - **Scheduled blocks.** A block can carry a `SCHEDULED` date — the maker's way of remembering future

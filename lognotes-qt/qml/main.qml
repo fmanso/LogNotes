@@ -29,6 +29,10 @@ ApplicationWindow {
     // window closes: the process exits before the timer fires.
     property var unsaved: ({})
 
+    // The one block currently in edit mode; every other block shows its markdown rendered. It lives on
+    // the window rather than on a delegate because delegates are rebuilt after every save.
+    property int editingRow: -1
+
     // The unlinked-mentions group is collapsed until you ask for it; 0.x behaviour, and it keeps a
     // page's reference panel short.
     property bool unlinkedExpanded: false
@@ -70,11 +74,7 @@ ApplicationWindow {
 
         function onReadyChanged() {
             if (journal.ready && root.focusRow < 0) {
-                root.focusRow = root.firstBlockRow()
-                root.focusCursor = 0
-                root.wantsFocus = true
-                root.focusRetries = 0
-                Qt.callLater(root.focusBlock, root.focusRow)
+                root.beginEdit(root.firstBlockRow(), 0)
             }
         }
 
@@ -83,11 +83,7 @@ ApplicationWindow {
             root.refreshPages()
             if (root.pendingViewFocus) {
                 root.pendingViewFocus = false
-                root.focusRow = root.firstBlockRow()
-                root.focusCursor = 0
-                root.wantsFocus = true
-                root.focusRetries = 0
-                Qt.callLater(root.focusBlock, root.focusRow)
+                root.beginEdit(root.firstBlockRow(), 0)
             }
             // Every applied snapshot means the pending text has been written.
             root.unsaved = ({})
@@ -124,10 +120,24 @@ ApplicationWindow {
         return 1
     }
 
+    // Clicking a rendered block enters edit mode at the caret the click landed on. The editor only
+    // becomes focusable once it is visible, so the focus call waits a frame.
+    function beginEdit(row, caret) {
+        root.editingRow = row
+        root.focusRow = row
+        root.focusCursor = Math.max(0, caret)
+        root.wantsFocus = true
+        root.focusRetries = 0
+        Qt.callLater(root.focusBlock, row)
+    }
+
     function focusBlock(row) {
         if (row < 0 || row >= list.count) {
             return false
         }
+        // Moving the caret into a block — with the arrow keys, or after a rebuild — is editing it, so
+        // the row shows its editor rather than its rendered form.
+        root.editingRow = row
         root.focusRow = row
         root.wantsFocus = true
         list.currentIndex = row
@@ -438,6 +448,7 @@ ApplicationWindow {
 
         delegate: Item {
             id: rowItem
+            objectName: "blockRow"
             width: list.width
             height: rowItem.isCollapsedMention
                     ? 0
@@ -454,6 +465,8 @@ ApplicationWindow {
             property bool isReference: kind === "reference-row" || kind === "unlinked-row"
             property bool isCollapsedMention: kind === "unlinked-row" && !root.unlinkedExpanded
             property bool hovered: false
+            property bool isBlockRow: isBlock
+            property bool editing: root.editingRow === index
             // A block's diagram is drawn under its line, so the row has to grow to hold it.
             property real diagramSpace: diagramArea.visible ? diagramArea.implicitHeight + 8 : 0
 
@@ -492,7 +505,8 @@ ApplicationWindow {
                 id: blockRow
                 visible: !rowItem.isHeading && !rowItem.isCollapsedMention
                 width: parent.width
-                height: Math.max(editor.visible ? editor.implicitHeight : 0, 24)
+                height: Math.max(editor.visible ? editor.implicitHeight
+                                                : (rendered.visible ? rendered.implicitHeight : 0), 24)
 
                 Item {
                     id: indentSpacer
@@ -563,7 +577,7 @@ ApplicationWindow {
                 TextEdit {
                     id: editor
                     objectName: "blockEditor"
-                    visible: rowItem.isBlock
+                    visible: rowItem.isBlock && (rowItem.editing || model.text === "")
                     anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
                     anchors.leftMargin: 8
                     anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
@@ -595,10 +609,15 @@ ApplicationWindow {
                     // pending debounced save when the block is left.
                     onActiveFocusChanged: {
                         if (activeFocus) {
+                            root.editingRow = index
                             if (root.wantsFocus) {
                                 cursorPosition = Math.min(root.focusCursor, length)
                             }
-                        } else if (debounce.running && !root.rebuilding) {
+                        } else if (!root.rebuilding && root.editingRow === index) {
+                            // The block goes back to its rendered form once the caret has left it.
+                            root.editingRow = -1
+                        }
+                        if (!activeFocus && debounce.running && !root.rebuilding) {
                             debounce.stop()
                             root.rebuilding = true
                             journal.edit(index, editor.text)
@@ -626,9 +645,11 @@ ApplicationWindow {
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
-                            if (event.modifiers & Qt.ShiftModifier) {
+                            if ((event.modifiers & Qt.ShiftModifier)
+                                    || journal.in_fence(editor.text, cursorPosition)) {
                                 // A line break inside the block: a fence or a diagram needs one, while
-                                // plain Enter must keep meaning "new block".
+                                // plain Enter must keep meaning "new block". Inside an open fence, Enter
+                                // continues it — typing ``` should be all it takes.
                                 editor.insert(editor.cursorPosition, "\n")
                                 root.focusRow = index
                                 root.focusCursor = editor.cursorPosition
@@ -696,6 +717,34 @@ ApplicationWindow {
                             root.focusCursor = 0
                             root.focusBlock(index + 1)
                             event.accepted = true
+                        }
+                    }
+                }
+
+                // The same block, read rather than edited: marks gone, links still links. Clicking it
+                // swaps in the editor and puts the caret where the click landed.
+                TextEdit {
+                    id: rendered
+                    objectName: "blockRendered"
+                    visible: rowItem.isBlock && !rowItem.editing && model.text !== ""
+                    textFormat: TextEdit.RichText
+                    text: model.html
+                    readOnly: true
+                    selectByMouse: false
+                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.leftMargin: 8
+                    anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: model.marker === "DONE" ? "#8a857c" : "#242424"
+                    font.pixelSize: 16
+                    font.strikeout: model.marker === "DONE"
+                    wrapMode: TextEdit.Wrap
+
+                    TapHandler {
+                        onSingleTapped: (event) => {
+                            const shown = rendered.positionAt(event.position.x, event.position.y)
+                            root.beginEdit(index, journal.raw_position(model.text, shown))
                         }
                     }
                 }

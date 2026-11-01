@@ -171,10 +171,16 @@ with their language and code. Spans are style *flags* — dim, bold, italic, str
 so nesting composes (italic inside bold) and a caller picks what to do with each.
 
 Two rules make the rest of the app possible: syntax marks are their own dim spans, so a view can keep
-them (the editor) or drop them (a rendered summary) from the same scan; and `to_html` renders a block as
-one line of escaped HTML with the marks gone and links carrying `page:<name>` or their URL, which is what
-a read-only row shows. Every character of the note is escaped there, so nothing a note says can become
-markup.
+them (the editor) or drop them (anything rendered) from the same scan; and `to_html` / `to_html_block`
+render a block as escaped HTML with the marks gone and links carrying `page:<name>` or their URL — one
+line for a summary row, line breaks kept for a block at rest, where a fence has to stay a block of code.
+Every character of the note is escaped there, so nothing a note says can become markup.
+
+Three queries serve the editor's own behaviour: `in_fence` says whether a caret sits inside a fence (on the
+line that opened it or in its body, not on the line that closes it), which is what makes Enter continue a
+code block instead of starting a new one; `raw_position` translates a caret counted in the *rendered* text
+back to the raw one, because a block at rest is clicked in text that has no marks in it; and `link_at`
+finds the link under a click.
 
 Offsets are bytes, as Rust slices are. UTF-16 positions — what a Qt text document counts in — are the
 bridge's business, not this crate's.
@@ -223,4 +229,6 @@ emphasis, an unclosed marker staying plain, `snake_case` not italicising, links 
 ranges, a tag stopping at punctuation, a fence collecting its lines and hiding the links inside them, a
 fence still being typed, and every span landing on a character boundary. `to_html` is covered for
 escaping (a note containing markup shows that markup), dropped marks, one line per block, and
-`page:`/URL hrefs. `link_at` resolves a click to the link under it.
+`page:`/URL hrefs; `to_html_block` for keeping a fence's lines. `link_at` resolves a click to the link
+under it, `in_fence` covers both edges of a fence and one that was never closed, and `raw_position` maps a
+rendered caret back past the marks, in UTF-16 units and across an emoji.

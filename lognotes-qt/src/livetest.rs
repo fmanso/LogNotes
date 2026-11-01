@@ -308,26 +308,61 @@ pub fn run() -> ! {
         format!("format={code_format}"),
     );
 
+    // ---- a block at rest renders its markdown ----------------------------------------------
+    // Moving the caret to another block leaves this one showing its finished text.
+    driver::click_block(1);
+    driver::wait_ms(700);
+    shot("19-block-at-rest");
+    let shown = driver::named_text(&QString::from("blockRendered"), 0).to_string();
+    check(
+        "a block that is not being edited shows the finished text",
+        shown.contains("font-weight:700")
+            && shown.contains("monospace")
+            && !shown.contains("**")
+            && !shown.contains('`'),
+        format!("html={shown:?}"),
+    );
+
+    // And clicking it edits it again, at the caret the click landed on, marks intact.
+    let raw_before = driver::editor_text(0).to_string();
+    driver::click_block(0);
+    driver::wait_ms(300);
+    driver::type_text(&QString::from("~"));
+    driver::wait_ms(700);
+    shot("20-click-to-edit");
+    let raw_after = driver::editor_text(0).to_string();
+    check(
+        "clicking a rendered block edits it again with its marks intact",
+        raw_after.chars().count() == raw_before.chars().count() + 1 && raw_after.contains("**bold**"),
+        format!("{raw_before:?} -> {raw_after:?}"),
+    );
+
     // ---- a fence that spans lines, and the diagram it draws ---------------------------------
     let blocks_before_fence = blocks(&root).len();
+    driver::click_block(0);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::CTRL);
+    driver::wait_ms(100);
+    // Shift+Enter starts the fence on a line of its own; from the moment the ``` is open, plain Enter
+    // continues it — which is what typing a code block has to feel like.
     driver::press_key(key::RETURN, modifier::SHIFT);
     driver::wait_ms(150);
     driver::type_text(&QString::from("```mermaid"));
-    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(150);
     driver::type_text(&QString::from("graph TD"));
-    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(150);
     driver::type_text(&QString::from("  A --> B"));
-    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(150);
     driver::type_text(&QString::from("```"));
     driver::wait_ms(1800);
-    shot("19-diagram");
+    shot("21-diagram");
 
     let fenced = blocks(&root);
     check(
-        "shift+enter kept the whole fence inside one block",
+        "enter inside a fence kept the whole of it in one block",
         blocks_before_fence == fenced.len() && fenced[0].contains("```mermaid") && fenced[0].contains('\n'),
         format!("blocks={} fence={:?}", fenced.len(), fenced[0]),
     );
@@ -356,7 +391,7 @@ pub fn run() -> ! {
     driver::wait_ms(150);
     driver::type_text(&QString::from("this is not a diagram"));
     driver::wait_ms(1800);
-    shot("20-diagram-error");
+    shot("22-diagram-error");
 
     let error = driver::named_text(&QString::from("diagramError"), 0).to_string();
     check(
@@ -368,11 +403,10 @@ pub fn run() -> ! {
     // Leave the caret where the close test expects it: at the end of the first block.
     driver::click_block(0);
     driver::wait_ms(300);
-    driver::press_key(key::END, modifier::NONE);
+    // Ctrl+End, not End: a block can hold several lines now, and End stops at the end of the line.
+    driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(200);
 
-    driver::close_window();
-    driver::wait_ms(400);
     check(
         "the journal is reachable again from the switcher",
         driver::row_count() > page_open,
@@ -382,7 +416,6 @@ pub fn run() -> ! {
     // Quit straight after a keystroke: the debounce has not fired, so only the close handler can
     // save it. This is the difference between losing and keeping the last thing you typed.
     let before_flush = blocks(&root);
-    // Ctrl+End, not End: a block can hold several lines now, and End stops at the end of the line.
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
     driver::type_text(&QString::from(" now"));
