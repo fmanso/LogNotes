@@ -445,6 +445,37 @@ pub fn run() -> ! {
         format!("error={error:?}"),
     );
 
+    // ---- a python fence is coloured ---------------------------------------------------------
+    // The last block is free: give it a fence whose language is known, then read what it renders.
+    driver::click_block(3);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::CTRL);
+    driver::wait_ms(100);
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("```python"));
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("def f():"));
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("    return 1"));
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("```"));
+    driver::wait_ms(1200);
+
+    // Leave the block so it renders, then read its HTML.
+    driver::click_block(0);
+    driver::wait_ms(800);
+    shot("24-python-fence");
+    let code_html = driver::row_html(3).to_string();
+    check(
+        "a python fence renders its keywords and numbers coloured",
+        code_html.contains("def") && code_html.contains("#3a6ea5") && code_html.contains("#a4443c"),
+        format!("html={code_html:?}"),
+    );
+
     // ---- search -----------------------------------------------------------------------------
     // Ctrl+K over the whole graph: pages by name first, then blocks by their text.
     driver::press_key(key::K, modifier::CTRL);
@@ -457,7 +488,7 @@ pub fn run() -> ! {
 
     driver::type_text(&QString::from("Project"));
     driver::wait_ms(800);
-    shot("24-search");
+    shot("25-search");
     check(
         "typing finds the page and the blocks that mention it",
         driver::search_count() >= 2,
@@ -467,7 +498,7 @@ pub fn run() -> ! {
     // The page ranks first, so Enter opens it.
     driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(900);
-    shot("25-search-opened-page");
+    shot("26-search-opened-page");
     let opened_page_rows = driver::row_count();
     check(
         "enter opens the page the first hit names",
@@ -486,12 +517,48 @@ pub fn run() -> ! {
     driver::wait_ms(900);
     driver::type_text(&QString::from("Q"));
     driver::wait_ms(800);
-    shot("26-search-opened-block");
+    shot("27-search-opened-block");
     check(
         "a block hit opens that block with the caret on the match",
         blocks(&root).iter().any(|block| block.contains("Qworld")),
         format!("blocks={:?}", blocks(&root)),
     );
+
+    // ---- a link in a block at rest opens its page --------------------------------------------
+    // Nothing is editing block 1, so its [[My Project]] is a real anchor. Find its pixels with the
+    // view's own hit test and click it.
+    driver::click_block(0);
+    driver::wait_ms(400);
+    check(
+        "a link in a block at rest can be clicked",
+        driver::click_link(1),
+        "found a link under the pointer and clicked it".to_string(),
+    );
+    driver::wait_ms(900);
+    shot("28-link-opened");
+    let linked_rows = driver::row_count();
+    check(
+        "clicking a link opens that page",
+        linked_rows > 0 && linked_rows < 20,
+        format!("rows={linked_rows}"),
+    );
+
+    // And the page it opened takes a keystroke — a page with no blocks used to fail here.
+    driver::type_text(&QString::from("R"));
+    driver::wait_ms(800);
+    shot("29-link-typed");
+    let on_page = page_blocks(&root, "My Project");
+    check(
+        "the page a link opened takes a keystroke",
+        on_page.iter().any(|block| block.contains('R')),
+        format!("page blocks={on_page:?}"),
+    );
+
+    // Back to the journal for the close test.
+    driver::click_named(&QString::from("pagesButton"), 0);
+    driver::wait_ms(400);
+    driver::click_named(&QString::from("pageEntry"), 0);
+    driver::wait_ms(900);
 
     // Leave the caret where the close test expects it: at the end of the first block.
     driver::click_block(0);
@@ -542,6 +609,19 @@ fn rows(root: &std::path::Path) -> Vec<BlockRow> {
 
 fn blocks(root: &std::path::Path) -> Vec<String> {
     rows(root).into_iter().map(|block| block.content).collect()
+}
+
+fn page_blocks(root: &std::path::Path, name: &str) -> Vec<String> {
+    let store = Store::open(root.join("lognotes.db")).expect("open the livetest database");
+    let Some(page) = store.page_by_name(name).expect("read the page") else {
+        return Vec::new();
+    };
+    store
+        .page_blocks(page.id)
+        .expect("read the page's blocks")
+        .into_iter()
+        .map(|block| block.content)
+        .collect()
 }
 
 fn depths(root: &std::path::Path) -> Vec<u32> {

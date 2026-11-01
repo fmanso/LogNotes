@@ -150,6 +150,18 @@ and it keeps the database path the only OS-specific location in the codebase.
   caret away renders the block again. `editingRow` lives on the window, not on a delegate, because every
   save rebuilds the delegates and the open block has to stay open across that.
 - **An empty block is always the editor**, since there is nothing rendered to click.
+- **A click on a link at rest follows it.** The rendered block resolves the link with the view's own hit
+  test (`linkAt`) before deciding to edit, because a `TapHandler` takes the press and the read-only view
+  therefore never gets to emit `linkActivated`; the pointer turns into a hand over a link. `Ctrl+click` in
+  the editor is unchanged.
+- **Opening a page ensures it exists.** `open_page` dispatches `EnsurePage` before the snapshot, so a link
+  naming a page nothing has written yet lands on an empty page you can type in. That needed a second fix:
+  the placeholder row on a named page carries the page's *name* in its `date` field, and materialising it as
+  a journal day failed — `Materialize` and `Submit` now carry a destination, day or page, chosen from the
+  view's mode.
+- **Ctrl+K is claimed in the delegate.** `TextEdit` binds it to delete-to-end-of-line, so the window
+  shortcut alone would delete the block's text instead of opening the switcher whenever the caret is in a
+  block. The delegate's key handler takes it first, and the window shortcut covers the rest.
 - **Focus is taken in the same event, not on the next frame.** A keystroke typed the instant a block is
   clicked has to land in it, and a frame's delay silently eats it — this is what made starting a fence
   feel broken. `beginEdit` and the caret restore after a rebuild both call the focus path directly and
@@ -188,6 +200,9 @@ and it keeps the database path the only OS-specific location in the codebase.
   the page's own colours. The Pages popup and the date picker are cream panels with a hairline border and a
   tinted hover row, because the control style's default chrome is dark and the text drawn on it was
   `#242424` on `#2a2a2a` — a page list you could not read.
+- **Code fences are coloured by the view's palette.** The four colours live in `CODE_COLOURS` in the bridge
+  and are handed to `to_html_block`; core decides what a token is, the view decides what it looks like. A
+  fence whose language nobody knows renders as plain code.
 - **A read-only row is rendered, not styled.** The agenda and reference rows are `Label`s with rich text
   from the `html` role: the scan's dim spans are dropped, so the row reads as finished text, and its links
   navigate on a plain click.
@@ -231,8 +246,9 @@ mentions, typing `**bold**` and `code` and reading back the *formats* the editor
 to see it render and clicking it to see its marks come back, typing immediately after that click and again
 after Enter to prove no keystroke is eaten, typing ``` in a fresh block to start a code block, building the
 fence with plain Enter once it is open and checking the diagram it drew, a fence that does not parse and the
-one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, and finally a close with a pending
-debounce. Each step is checked against the
+one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, a python fence read back as coloured
+HTML, clicking a link in a block at rest and typing on the page it opened, and finally a close with a
+pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 
@@ -251,8 +267,10 @@ constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
 not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
-readers: the text or source of a named item (`named_text`, for a rendered block, a summary row and a
-diagram's URL) and how many rows the quick switcher is showing (`search_count`). Its block helpers address a
+readers: the text or source of a named item (`named_text`, for a summary row and a diagram's URL), the HTML
+a block row renders (`row_html`), and how many rows the quick switcher is showing (`search_count`). It can
+also click a real link inside a block at rest (`click_link`), found with the view's own hit test rather than
+guessed at. Its block helpers address a
 row and then pick the view inside it, because a block may be showing either the editor or its rendered form,
 and a row with a diagram is far taller than its text. It activates its window on attach, because an input
 method only delivers to an active one.

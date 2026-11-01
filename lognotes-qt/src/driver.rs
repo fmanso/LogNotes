@@ -37,6 +37,10 @@ mod ffi {
         fn lognotes_click_named(name: &QString, index: i32) -> bool;
         #[rust_name = "named_text"]
         fn lognotes_named_text(name: &QString, index: i32) -> QString;
+        #[rust_name = "click_link"]
+        fn lognotes_click_link(index: i32) -> bool;
+        #[rust_name = "row_html"]
+        fn lognotes_row_html(index: i32) -> QString;
         #[rust_name = "search_count"]
         fn lognotes_search_count() -> i32;
         #[rust_name = "scroll_to_end"]

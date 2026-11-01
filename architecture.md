@@ -68,6 +68,13 @@ The rejected alternatives are what make this the decision it is — a rich-text 
 styled copy of the text, would each give the app two truths about a block that can drift apart, and put
 the caret and the saved text at the mercy of a renderer.
 
+**Code is lexed, not parsed, and coloured by the view's palette.** A fence's language picks one of six
+families in core's `code` module, and a lexer — not a parser — turns its body into keyword, string, comment
+and number runs. That is why it never fails on odd input: an unterminated string stops at the end of its
+line, so a stray quote cannot paint the rest of a fence. The four colours are passed into the renderer from
+the view, because Qt's rich text accepts colours inline only and the palette belongs beside the rest of the
+view's colours.
+
 **Search is a query, not a screen.** The quick switcher asks core for pages whose name matches and blocks
 whose text does; the ranking — exact name, then prefix, then FTS5's bm25 over the one full-text index —
 lives beside the data, and the view only draws the rows. That index was already there for plain mentions,

@@ -46,6 +46,13 @@ bool lognotes_click_named(const QString& name, int index);
 // or an empty string. How a rendered summary row and a drawn diagram are checked.
 QString lognotes_named_text(const QString& name, int index);
 
+// Clicks a link inside the index-th block row at rest, found with the view's own hit test. False when
+// that row is being edited or holds no link.
+bool lognotes_click_link(int index);
+
+// The HTML the index-th block row renders at rest — what the markdown, or a coloured fence, produced.
+QString lognotes_row_html(int index);
+
 // How many rows the quick switcher is showing, or -1 when it is not open.
 int lognotes_search_count();
 

@@ -35,6 +35,15 @@ const CHUNK_DAYS: u32 = 14;
 /// How far ahead the agenda looks. The rule itself lives in `lognotes`.
 const AGENDA_HORIZON_DAYS: u32 = 7;
 
+/// The colours a rendered code fence uses: the app's own palette, and the only place HTML colour is
+/// chosen. They are passed into the renderer because Qt's rich text takes colours inline only.
+const CODE_COLOURS: markdown::CodeColours<'_> = markdown::CodeColours {
+    keyword: "#3a6ea5",
+    string: "#4a7c59",
+    comment: "#a39c90",
+    number: "#a4443c",
+};
+
 /// How many page names and how many blocks the quick switcher shows for one query.
 const SEARCH_PAGES: usize = 5;
 const SEARCH_BLOCKS: usize = 20;
@@ -285,10 +294,29 @@ pub struct JournalRust {
     focus_row: i32,
 }
 
+/// Where a block that does not exist yet has to be created: a journal day, or a named page.
+///
+/// The placeholder row on a fresh page carries the page's *name* in its `date` field, so treating every
+/// placeholder as a day tried to create a journal page called "My Project" and failed.
+#[derive(Clone, Debug, PartialEq)]
+enum Destination {
+    Day(String),
+    Page(String),
+}
+
+fn destination(mode: &Mode, row: &Row) -> Destination {
+    match mode {
+        Mode::Journal => Destination::Day(row.date.clone()),
+        Mode::Page(name) => Destination::Page(name.clone()),
+    }
+}
+
 enum Command {
     Update { block_id: i32, text: String },
-    Materialize { date: String, text: String },
-    Submit { date: String, block_id: i32, text: String, offset: usize },
+    Materialize { destination: Destination, text: String },
+    Submit { destination: Destination, block_id: i32, text: String, offset: usize },
+    /// Create a page if it does not exist — what opening one from a link calls first.
+    EnsurePage { name: String },
     Indent { block_id: i32 },
     Outdent { block_id: i32 },
     Delete { block_id: i32 },
@@ -467,7 +495,7 @@ impl qobject::Journal {
         };
         let command = if target.kind == Kind::Placeholder {
             Command::Materialize {
-                date: target.date,
+                destination: destination(&self.mode, &target),
                 text: text.to_string(),
             }
         } else if !target.is_editable_block() {
@@ -490,7 +518,7 @@ impl qobject::Journal {
         }
         let command = if target.kind == Kind::Placeholder {
             Command::Materialize {
-                date: target.date,
+                destination: destination(&self.mode, &target),
                 text: text.to_string(),
             }
         } else {
@@ -514,7 +542,7 @@ impl qobject::Journal {
             return;
         }
         let command = Command::Submit {
-            date: target.date,
+            destination: destination(&self.mode, &target),
             block_id: target.block_id,
             text: text.to_string(),
             offset: offset.max(0) as usize,
@@ -578,8 +606,11 @@ impl qobject::Journal {
         if name.trim().is_empty() {
             return;
         }
-        self.as_mut().rust_mut().mode = Mode::Page(name);
-        self.as_mut().dispatch(None);
+        self.as_mut().rust_mut().mode = Mode::Page(name.clone());
+        // Opening a page from a link can name one that was never written: create it, so the click lands
+        // on a page you can type in rather than on an empty view that refuses a keystroke.
+        self.as_mut()
+            .dispatch(Some(Command::EnsurePage { name }));
     }
 
     fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool {
@@ -839,18 +870,22 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
 
     match command {
         Command::Update { block_id, text } => store.update_content(block_id as i64, &text).map_err(fail),
-        Command::Materialize { date, text } => {
-            let page = store.ensure_journal_page(&date).map_err(fail)?;
+        Command::EnsurePage { name } => store.ensure_page(&name).map(|_| ()).map_err(fail),
+        Command::Materialize {
+            destination,
+            text,
+        } => {
+            let page = page_for(store, &destination)?;
             store.insert_block(page, None, &text).map_err(fail)?;
             Ok(())
         }
         Command::Submit {
-            date,
+            destination,
             block_id,
             text,
             offset,
         } => {
-            let page = store.ensure_journal_page(&date).map_err(fail)?;
+            let page = page_for(store, &destination)?;
             let boundary = text
                 .char_indices()
                 .nth(offset)
@@ -883,6 +918,15 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
             .map_err(fail),
         Command::Undo => store.undo().map(|_| ()).map_err(fail),
         Command::Redo => store.redo().map(|_| ()).map_err(fail),
+    }
+}
+
+/// The page a block should be created on, making it — and its day, or its name — exist if it does not.
+fn page_for(store: &mut Store, destination: &Destination) -> Result<i64, String> {
+    let fail = |error: lognotes_core::Error| error.to_string();
+    match destination {
+        Destination::Day(date) => store.ensure_journal_page(date).map_err(fail),
+        Destination::Page(name) => store.ensure_page(name).map_err(fail),
     }
 }
 
@@ -997,7 +1041,7 @@ fn day_rows(date: &str, blocks: &[BlockRow], drawn: &HashMap<i64, Drawn>) -> Vec
             depth: block.depth,
             // A block is shown as this until it is clicked, so it keeps its line breaks — a fence has to
             // still read as a block of code.
-            html: markdown::to_html_block(&block.content),
+            html: markdown::to_html_block(&block.content, &CODE_COLOURS),
             text: block.content.clone(),
             marker: block.marker,
             scheduled: block.scheduled_date.clone(),
@@ -1355,7 +1399,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Materialize {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 text: "hello".into(),
             },
         )
@@ -1365,12 +1409,56 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_page_that_does_not_exist_creates_it() {
+        let mut store = session();
+        run_command(
+            &mut store,
+            Command::EnsurePage {
+                name: "Fresh Page".into(),
+            },
+        )
+        .unwrap();
+
+        let page = store.page_by_name("Fresh Page").unwrap().expect("created");
+        assert_eq!(
+            page.kind,
+            lognotes_core::PageKind::Page,
+            "a page name is not a date"
+        );
+    }
+
+    #[test]
+    fn a_page_that_was_just_created_takes_a_keystroke() {
+        let mut store = session();
+        run_command(
+            &mut store,
+            Command::EnsurePage {
+                name: "Fresh Page".into(),
+            },
+        )
+        .unwrap();
+        run_command(
+            &mut store,
+            Command::Materialize {
+                destination: Destination::Page("Fresh Page".into()),
+                text: "first note".into(),
+            },
+        )
+        .unwrap();
+
+        let page = store.page_by_name("Fresh Page").unwrap().expect("created");
+        let blocks = store.page_blocks(page.id).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "first note");
+    }
+
+    #[test]
     fn enter_mid_block_splits_and_keeps_both_halves() {
         let mut store = session();
         run_command(
             &mut store,
             Command::Materialize {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 text: "helloworld".into(),
             },
         )
@@ -1384,7 +1472,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Submit {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 block_id: id,
                 text: "helloworld".into(),
                 offset: 5,
@@ -1402,7 +1490,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Materialize {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 text: "hello".into(),
             },
         )
@@ -1416,7 +1504,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Submit {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 block_id: id,
                 text: "hello".into(),
                 offset: 5,
@@ -1434,7 +1522,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Submit {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 block_id: -1,
                 text: "helloworld".into(),
                 offset: 5,
@@ -1451,7 +1539,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Materialize {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 text: "hello".into(),
             },
         )
@@ -1464,7 +1552,7 @@ mod tests {
         run_command(
             &mut store,
             Command::Submit {
-                date: "2026-04-13".into(),
+                destination: Destination::Day("2026-04-13".into()),
                 block_id: id,
                 text: "helloworld".into(),
                 offset: 5,

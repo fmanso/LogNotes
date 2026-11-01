@@ -1,9 +1,10 @@
 //! Reading markdown out of block text.
 //!
 //! One scanner answers every question the app asks about a block's text: what the link table should
-//! hold, how the editor should style it, what a read-only row should render, and which fences a diagram
-//! is drawn from. Keeping that in one place is what stops the link table and the styling from disagreeing
+//! hold, what a block at rest should render, and which fences a diagram is drawn from. Keeping that in one place is what stops the link table and the styling from disagreeing
 //! about what counts as a link or what sits inside code.
+
+use crate::code;
 
 /// What a run of block text should look like.
 ///
@@ -230,16 +231,26 @@ pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
 /// Every character of the note is escaped, so a block that contains markup shows that markup instead of
 /// becoming it.
 pub fn to_html(text: &str) -> String {
-    render(text, false)
+    render(text, false, None)
+}
+
+/// The colours a rendered fence uses. Passed in rather than owned here: this module knows what a token
+/// *is*, the view knows what colour it should be, and Qt's rich text takes colours inline only.
+#[derive(Clone, Copy, Debug)]
+pub struct CodeColours<'a> {
+    pub keyword: &'a str,
+    pub string: &'a str,
+    pub comment: &'a str,
+    pub number: &'a str,
 }
 
 /// The same rendering for a block that is not being edited: line breaks are kept, so a fence stays a
-/// block of code instead of collapsing into one line.
-pub fn to_html_block(text: &str) -> String {
-    render(text, true)
+/// block of code instead of collapsing into one line, and a fence whose language is known is coloured.
+pub fn to_html_block(text: &str, colours: &CodeColours) -> String {
+    render(text, true, Some(colours))
 }
 
-fn render(text: &str, keep_lines: bool) -> String {
+fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>) -> String {
     let scan = scan(text);
     let mut html = String::new();
     let mut cursor = 0;
@@ -254,7 +265,13 @@ fn render(text: &str, keep_lines: bool) -> String {
                 .iter()
                 .find(|link| link.start <= span.start && span.end <= link.end);
             open_tags(&mut html, span.style, href);
-            escape_into(&mut html, &text[span.start..span.end], keep_lines);
+            let language = fence_language(&scan, span, colours);
+            match (language, colours) {
+                (Some(language), Some(colours)) => {
+                    write_code(&mut html, &text[span.start..span.end], language, colours)
+                }
+                _ => escape_into(&mut html, &text[span.start..span.end], keep_lines),
+            }
             close_tags(&mut html, span.style);
         }
         cursor = cursor.max(span.end);
@@ -276,6 +293,44 @@ fn render(text: &str, keep_lines: bool) -> String {
     }
 
     html
+}
+
+/// The language a code span belongs to, when it sits inside a fence whose language is known.
+fn fence_language(scan: &Scan, span: &Span, colours: Option<&CodeColours>) -> Option<code::Language> {
+    if colours.is_none() || !span.style.contains(Style::CODE) {
+        return None;
+    }
+    scan.fences
+        .iter()
+        .find(|fence| {
+            fence.open_start <= span.start && fence.close_start.is_none_or(|end| span.start < end)
+        })
+        .and_then(|fence| code::language_of(&fence.lang))
+}
+
+/// One fence line, its tokens coloured and the rest left as it came.
+fn write_code(html: &mut String, code: &str, language: code::Language, colours: &CodeColours) {
+    let mut cursor = 0;
+    for token in code::tokens(code, language) {
+        if token.start > cursor {
+            escape_into(html, &code[cursor..token.start], true);
+        }
+        let colour = match token.kind {
+            code::TokenKind::Keyword => colours.keyword,
+            code::TokenKind::String => colours.string,
+            code::TokenKind::Comment => colours.comment,
+            code::TokenKind::Number => colours.number,
+        };
+        html.push_str("<span style=\"color:");
+        html.push_str(colour);
+        html.push_str("\">");
+        escape_into(html, &code[token.start..token.end], true);
+        html.push_str("</span>");
+        cursor = token.end;
+    }
+    if cursor < code.len() {
+        escape_into(html, &code[cursor..], true);
+    }
 }
 
 fn open_tags(html: &mut String, style: Style, href: Option<&LinkRef>) {
@@ -606,6 +661,13 @@ fn find(text: &str, from: usize, to: usize, needle: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    const INK: CodeColours = CodeColours {
+        keyword: "#k",
+        string: "#s",
+        comment: "#c",
+        number: "#n",
+    };
+
     fn styles(text: &str) -> Vec<(String, Style)> {
         scan(text)
             .spans
@@ -917,15 +979,45 @@ mod tests {
 
     #[test]
     fn a_block_at_rest_keeps_its_line_breaks() {
-        let html = to_html_block("```mermaid\ngraph TD\n  A --> B\n```");
+        let html = to_html_block("```mermaid\ngraph TD\n  A --> B\n```", &INK);
 
         assert_eq!(html, "<code>graph TD</code><br><code>  A --&gt; B</code>");
-        assert_eq!(to_html_block("first\nsecond"), "first<br>second");
+        assert_eq!(to_html_block("first\nsecond", &INK), "first<br>second");
         assert_eq!(
             to_html("first\nsecond"),
             "first second",
             "a summary stays one line"
         );
+    }
+
+    #[test]
+    fn a_fence_of_a_known_language_is_coloured() {
+        let html = to_html_block("```python\ndef f():\n    return 1\n```", &INK);
+
+        assert!(
+            html.contains("<span style=\"color:#k\">def</span>"),
+            "keyword not coloured in {html}"
+        );
+        assert!(
+            html.contains("<span style=\"color:#n\">1</span>"),
+            "number not coloured in {html}"
+        );
+    }
+
+    #[test]
+    fn a_fence_of_an_unknown_language_stays_plain() {
+        let html = to_html_block("```mermaid\ngraph TD\n```", &INK);
+
+        assert!(!html.contains("<span style=\"color:"), "coloured anyway: {html}");
+        assert!(html.contains("<code>graph TD</code>"));
+    }
+
+    #[test]
+    fn code_inside_a_fence_is_escaped_before_it_is_coloured() {
+        let html = to_html_block("```html\n<script>alert('x')</script>\n```", &INK);
+
+        assert!(html.contains("&lt;script"), "not escaped: {html}");
+        assert!(!html.contains("<script>"), "raw markup leaked: {html}");
     }
 
     #[test]

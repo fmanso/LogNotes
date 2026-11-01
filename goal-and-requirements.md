@@ -38,8 +38,8 @@ application small enough to fully own and trim.
   its linked references at the bottom, both explicit links and plain mentions, as 0.x does. *(Plain-mention
   references inferred from 0.x behavior — unconfirmed.)*
 - **Markdown, rendered.** A block shows its text finished: bold, italic, code, headings and quotes are
-  styled, `[[links]]`, `#tags` and external links are followable, and a ```mermaid fence draws its diagram
-  beneath itself. Clicking a block swaps in its plain text — every character alike, marks and all, nothing
+  styled, `[[links]]`, `#tags` and external links are followable, a ```mermaid fence draws its diagram
+  beneath itself, and a code fence is coloured by its language. Clicking a block swaps in its plain text — every character alike, marks and all, nothing
   styled — to edit it, and leaving it renders again. What is stored is always the markdown. The agenda and
   the reference panels show the same finished rendering.
 - **Tasks.** Blocks are marked `TODO`, `DOING`, or `DONE`, cycled by a shortcut. *(`DOING` inferred from
@@ -51,6 +51,8 @@ application small enough to fully own and trim.
   layout. An item stays listed until it is marked `DONE`, and disappears immediately once it is. *(The
   7-day horizon reads "like a week before hand" — unconfirmed as an exact number. That overdue items stay
   listed is inferred from "if marked as DONE it should disappear" — unconfirmed.)*
+- **A link goes where it points.** A click on `[[page]]` or `#tag` in a block opens that page, creating it if
+  nothing has written it yet, so the click always lands somewhere you can type.
 - **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names first, then blocks whose
   text matches, as you type. `Enter` opens the page, or puts the caret on the match in the block it found.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the

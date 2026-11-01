@@ -1017,6 +1017,12 @@ ApplicationWindow {
                                 }
                             }
                             event.accepted = true
+                        } else if (event.key === Qt.Key_K
+                                   && (event.modifiers & Qt.ControlModifier)) {
+                            // TextEdit binds Ctrl+K to "delete to end of line" and would eat the key —
+                            // deleting your text instead of opening the switcher. Claim it here.
+                            root.openSearch()
+                            event.accepted = true
                         } else if (event.key === Qt.Key_S
                                    && (event.modifiers & Qt.ControlModifier)
                                    && (event.modifiers & Qt.ShiftModifier)) {
@@ -1089,8 +1095,20 @@ ApplicationWindow {
                     font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
 
+                    // The pointer turns into a hand over a link and stays an I-beam elsewhere.
+                    onLinkHovered: (link) => rendered.cursorShape =
+                                    link === "" ? Qt.IBeamCursor : Qt.PointingHandCursor
+
+                    // A click on a link follows it; a click anywhere else starts editing there. The tap
+                    // handler takes the press, so the read-only view never gets to emit `linkActivated`
+                    // and the link is resolved here, with the same hit test the view uses.
                     TapHandler {
                         onSingleTapped: (event) => {
+                            const link = rendered.linkAt(event.position.x, event.position.y)
+                            if (link !== "") {
+                                root.openLink(link)
+                                return
+                            }
                             const shown = rendered.positionAt(event.position.x, event.position.y)
                             root.beginEdit(index, journal.raw_position(model.text, shown))
                         }

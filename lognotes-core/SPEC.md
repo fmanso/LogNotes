@@ -151,6 +151,18 @@ insert. Keys are generated in exactly one place in this crate, and the unique si
 backstop against a duplicate. Repeated insertion into the same gap lengthens keys; at personal-note scale
 that is invisible, and a rebalance is therefore not implemented.
 
+## Code fences
+
+`code` reads a fence's language and lexes its body into `Keyword`, `String`, `Comment` and `Number` runs.
+Six families — shell, PowerShell, Python, C-like, markup and SQL — share one scanner and differ in little
+more than their comment markers, quote characters and keyword lists. It is a lexer, not a parser: it never
+fails, and an unterminated string stops at the end of its line, so one stray quote cannot paint the rest of a
+fence. A fence naming an unknown language yields no tokens, which renders as plain code.
+
+`to_html_block` takes the four colours as `CodeColours` instead of owning them: colour is the view's
+decision, and Qt's rich text accepts colours inline only, so passing them in is what keeps the palette in one
+place without a second HTML renderer.
+
 ## Link extraction
 
 On every content write, the store extracts:
@@ -234,6 +246,11 @@ escaping (a note containing markup shows that markup), dropped marks, one line p
 `page:`/URL hrefs; `to_html_block` for keeping a fence's lines. `link_at` resolves a click to the link
 under it, `in_fence` covers both edges of a fence and one that was never closed, and `raw_position` maps a
 rendered caret back past the marks, in UTF-16 units and across an emoji.
+
+`code` has its own tests: each family's comments, strings, keywords and numbers; a triple-quoted Python
+string spanning lines; SQL keywords in any case; a stray quote stopping at its line; tokens never overlapping
+or splitting a character. The block renderer is covered for a known-language fence being coloured, an unknown
+one staying plain, and `<script>` inside a fence still being escaped.
 
 `search` has its own file: page ranking (exact, prefix, anywhere, capped, journals excluded), a half-typed
 word already matching block text, a block hit naming the page it lives on, an empty answer for a query that

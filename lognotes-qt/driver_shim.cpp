@@ -122,6 +122,20 @@ void collect_editors(QQuickItem* item, QList<QQuickItem*>& out) {
     }
 }
 
+// Names, whether or not the item is on screen — a row's rendered view exists even while its editor is the
+// one being shown.
+void collect_any(QQuickItem* item, const QString& name, QList<QQuickItem*>& out) {
+    if (!item) {
+        return;
+    }
+    if (item->objectName() == name) {
+        out.append(item);
+    }
+    for (auto* child : item->childItems()) {
+        collect_any(child, name, out);
+    }
+}
+
 void collect_named(QQuickItem* item, const QString& name, QList<QQuickItem*>& out) {
     if (!item) {
         return;
@@ -261,6 +275,57 @@ QString lognotes_named_text(const QString& name, int index) {
         return text.toString();
     }
     return item->property("source").toString();
+}
+
+bool lognotes_click_link(int index) {
+    auto* w = window();
+    if (!w) {
+        return false;
+    }
+    const auto rows = block_rows();
+    if (index < 0 || index >= rows.size()) {
+        return false;
+    }
+
+    // Only a row at rest draws anchors; the editor needs Ctrl+click.
+    QList<QQuickItem*> rendered;
+    collect_named(rows.at(index), QStringLiteral("blockRendered"), rendered);
+    if (rendered.isEmpty()) {
+        return false;
+    }
+    auto* item = rendered.first();
+
+    // Walk the rendered text until the item's own hit test says there is a link under the point.
+    for (qreal y = 2; y < item->height(); y += 4) {
+        for (qreal x = 2; x < item->width(); x += 8) {
+            QString link;
+            if (!QMetaObject::invokeMethod(item, "linkAt", Q_RETURN_ARG(QString, link),
+                                           Q_ARG(double, x), Q_ARG(double, y))
+                || link.isEmpty()) {
+                continue;
+            }
+            const QPointF scene = item->mapToScene(QPointF(x, y));
+            const QPointF global = w->mapToGlobal(scene.toPoint());
+            QMouseEvent press(QEvent::MouseButtonPress, scene, global, Qt::LeftButton,
+                              Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(w, &press);
+            QMouseEvent release(QEvent::MouseButtonRelease, scene, global, Qt::LeftButton,
+                                Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(w, &release);
+            return true;
+        }
+    }
+    return false;
+}
+
+QString lognotes_row_html(int row) {
+    const auto rows = block_rows();
+    if (row < 0 || row >= rows.size()) {
+        return QString();
+    }
+    QList<QQuickItem*> rendered;
+    collect_any(rows.at(row), QStringLiteral("blockRendered"), rendered);
+    return rendered.isEmpty() ? QString() : rendered.first()->property("text").toString();
 }
 
 int lognotes_search_count() {
