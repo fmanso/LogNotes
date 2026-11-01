@@ -220,17 +220,6 @@ struct Row {
 }
 
 impl Row {
-    fn is_heading(&self) -> bool {
-        matches!(
-            self.kind,
-            Kind::Heading
-                | Kind::AgendaHeader
-                | Kind::PageHeader
-                | Kind::ReferenceHeader
-                | Kind::UnlinkedHeader
-        )
-    }
-
     fn is_editable_block(&self) -> bool {
         self.kind == Kind::Block || self.kind == Kind::Placeholder
     }
