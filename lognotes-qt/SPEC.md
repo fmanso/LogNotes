@@ -204,9 +204,11 @@ and it keeps the database path the only OS-specific location in the codebase.
   button, a sidebar toggle and the theme toggle; typing in the field opens the results just under it, and
   `Ctrl+K` only puts the caret there. The sidebar lists Favourites then Recent (eight), and the Pages
   popup is gone — one way to reach a page, not two. A page is starred from the star in its own header.
-- **`Ctrl+K` and `Ctrl+B` are claimed in the delegate.** `TextEdit` binds them to delete-to-end-of-line
-  and bold, so the window shortcuts alone would edit your text instead of opening the switcher or hiding
-  the sidebar whenever the caret is in a block.
+- **`Ctrl+K` and `Ctrl+B`: the shortcut acts, the delegate consumes.** A window `Shortcut` runs before the
+  focused item sees the key but does not consume it, and `TextEdit` binds the same keys to
+  delete-to-end-of-line and bold — so a delegate that *acted* as well toggled twice, and one that did
+  nothing let the editor eat the key. The delegate now accepts the key without acting: one action, and
+  nothing for the editor to do with it.
 - **The list keeps no off-screen delegates.** `cacheBuffer: 0` on the column, because every save rebuilds
   the model and a cached delegate from before the rebuild lingers in the tree — invisible on screen,
   but findable by anything that walks it, which is how the live test first clicked a stale star.
@@ -288,7 +290,9 @@ constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
 not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
-readers: the text or source of a named item (`named_text`, for a summary row and a diagram's URL), the
+readers: the text or source of a named item (`named_text`, for a summary row and a diagram's URL), whether
+the window is actually shown (`window_visible` — `grabWindow()` happily captures a hidden window, so the
+first check of the run asserts it), the
 HTML a block row renders (`row_html`), any string property of the model (`journal_property` — the theme,
 the sidebar, the star), whether a named item is on screen (`visible`), and how many rows the quick
 switcher is showing (`search_count`). It can

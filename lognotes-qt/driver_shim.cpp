@@ -381,6 +381,11 @@ QString lognotes_journal_error() {
     return model ? model->property("error").toString() : QStringLiteral("<no model>");
 }
 
+bool lognotes_window_visible() {
+    auto* w = window();
+    return w && w->isVisible();
+}
+
 bool lognotes_journal_ready() {
     auto* model = journal_model();
     return model && model->property("ready").toBool();

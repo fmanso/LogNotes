@@ -8,9 +8,11 @@ ApplicationWindow {
     objectName: "mainWindow"
     width: 820
     height: 900
-    // Faded in once the store has answered, because the theme lives there: appearing light and then
-    // turning dark is worse than a few milliseconds of nothing. It stays `visible` rather than being
-    // hidden, so the compositor keeps the geometry it gave the window at creation.
+    // Shown from the start and faded in once the store has answered, because the theme lives there:
+    // appearing light and then turning dark is worse than a few milliseconds of nothing. `visible` stays
+    // true — a window that is created hidden and then shown gets tiled by the compositor, and one that is
+    // never shown at all is a window nobody can use.
+    visible: true
     opacity: root.revealed ? 1 : 0
     title: qsTr("LogNotes")
     color: theme.page
@@ -494,7 +496,7 @@ ApplicationWindow {
             MonthGrid {
                 id: grid
                 month: datePopup.monthAnchor
-                onClicked: (date) => datePopup.picked = date
+                onClicked: (pickedDay) => datePopup.picked = pickedDay
             }
 
             Label {
@@ -1198,16 +1200,12 @@ ApplicationWindow {
                                 }
                             }
                             event.accepted = true
-                        } else if (event.key === Qt.Key_B
+                        } else if ((event.key === Qt.Key_B || event.key === Qt.Key_K)
                                    && (event.modifiers & Qt.ControlModifier)) {
-                            // TextEdit binds Ctrl+B to bold and would eat the key. Claim it here.
-                            root.sidebarOpen = !root.sidebarOpen
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_K
-                                   && (event.modifiers & Qt.ControlModifier)) {
-                            // TextEdit binds Ctrl+K to "delete to end of line" and would eat the key —
-                            // deleting your text instead of searching. Claim it here.
-                            root.focusSearch()
+                            // The window shortcuts for Ctrl+B and Ctrl+K do the work — a shortcut runs
+                            // first but does not consume the key, so without this TextEdit would also
+                            // act on it (bold for Ctrl+B, delete-to-end-of-line for Ctrl+K) and a
+                            // delegated copy of the action would fire a second time. Consume only.
                             event.accepted = true
                         } else if (event.key === Qt.Key_S
                                    && (event.modifiers & Qt.ControlModifier)

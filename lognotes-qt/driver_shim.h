@@ -73,5 +73,8 @@ QString lognotes_journal_property(const QString& name);
 // The journal model's `error` text, empty when it opened fine.
 QString lognotes_journal_error();
 
+// Whether the window is actually shown — grabWindow() happily captures a hidden one, so this is checked.
+bool lognotes_window_visible();
+
 // Whether the journal model reports itself ready.
 bool lognotes_journal_ready();

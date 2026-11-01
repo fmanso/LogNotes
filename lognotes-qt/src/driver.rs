@@ -53,6 +53,8 @@ mod ffi {
         fn lognotes_journal_property(name: &QString) -> QString;
         #[rust_name = "journal_error"]
         fn lognotes_journal_error() -> QString;
+        #[rust_name = "window_visible"]
+        fn lognotes_window_visible() -> bool;
         #[rust_name = "journal_ready"]
         fn lognotes_journal_ready() -> bool;
     }

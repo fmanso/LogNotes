@@ -53,6 +53,12 @@ pub fn run() -> ! {
     };
 
     shot("01-open");
+    // A window nobody can see still screenshots, so its visibility is asserted rather than assumed.
+    check(
+        "the window is on screen",
+        driver::window_visible(),
+        "window()->isVisible()".to_string(),
+    );
     check(
         "caret is in today's block on launch",
         driver::focus_name().to_string() == "blockEditor",
