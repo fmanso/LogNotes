@@ -7,7 +7,9 @@
 //! module is compiled out of normal builds, so the shipped app carries neither the driver nor a test
 //! dependency.
 
+mod diagram;
 mod journal;
+mod markdown;
 
 #[cfg(feature = "driver")]
 mod driver;

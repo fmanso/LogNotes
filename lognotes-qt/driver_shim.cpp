@@ -1,6 +1,7 @@
 #include <lognotes-qt/driver_shim.h>
 
 #include <QAbstractItemModel>
+#include <QDebug>
 #include <QCoreApplication>
 #include <QList>
 #include <QEventLoop>
@@ -9,8 +10,14 @@
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QQuickTextDocument>
+#include <QTextBlock>
+#include <QTextCharFormat>
+#include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 #include <QWheelEvent>
+#include <QPointingDevice>
 #include <QMouseEvent>
 
 namespace {
@@ -197,17 +204,81 @@ bool lognotes_click_named(const QString& name, int index) {
     return true;
 }
 
-bool lognotes_scroll(int angle_delta) {
+QString lognotes_named_text(const QString& name, int index) {
+    auto* w = window();
+    if (!w) {
+        return QString();
+    }
+    QList<QQuickItem*> matches;
+    collect_named(w->contentItem(), name, matches);
+    if (index < 0 || index >= matches.size()) {
+        return QString();
+    }
+    auto* item = matches.at(index);
+    // A Label carries `text`, an Image carries `source`; read whichever this item has.
+    const QVariant text = item->property("text");
+    if (text.isValid() && !text.toString().isEmpty()) {
+        return text.toString();
+    }
+    return item->property("source").toString();
+}
+
+QString lognotes_editor_format(int index, int offset) {
+    auto* w = window();
+    if (!w) {
+        return QString();
+    }
+    QList<QQuickItem*> editors;
+    collect_editors(w->contentItem(), editors);
+    if (index < 0 || index >= editors.size()) {
+        return QString();
+    }
+
+    // cxx-qt gives QML a QQuickTextDocument; the formats live on the QTextDocument inside it.
+    auto* wrapper = qobject_cast<QQuickTextDocument*>(
+        editors.at(index)->property("textDocument").value<QObject*>());
+    if (!wrapper || !wrapper->textDocument()) {
+        return QString();
+    }
+    QTextDocument* document = wrapper->textDocument();
+    if (offset < 0 || offset >= document->characterCount() - 1) {
+        return QString();
+    }
+
+    // A highlighter sets formats on the block's *layout*, not on the document's fragments, so this is
+    // the only place they can be read back from.
+    const QTextBlock block = document->findBlock(offset);
+    if (!block.isValid() || !block.layout()) {
+        return QString();
+    }
+    const int inBlock = offset - block.position();
+    QTextCharFormat format;
+    for (const QTextLayout::FormatRange& range : block.layout()->formats()) {
+        if (range.start <= inBlock && inBlock < range.start + range.length) {
+            format = range.format;
+            break;
+        }
+    }
+
+    return QString("weight=%1 italic=%2 strike=%3 mono=%4 underline=%5")
+        .arg(format.fontWeight())
+        .arg(format.fontItalic() ? 1 : 0)
+        .arg(format.fontStrikeOut() ? 1 : 0)
+        .arg(format.hasProperty(QTextFormat::FontFamilies) ? 1 : 0)
+        .arg(format.fontUnderline() ? 1 : 0);
+}
+
+bool lognotes_scroll_to_end() {
     auto* w = window();
     if (!w) {
         return false;
     }
-    const QPointF centre(w->width() / 2.0, w->height() / 2.0);
-    QWheelEvent wheel(centre, w->mapToGlobal(centre.toPoint()), QPoint(0, 0),
-                      QPoint(0, angle_delta), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase,
-                      false);
-    QCoreApplication::sendEvent(w, &wheel);
-    return true;
+    QList<QQuickItem*> columns;
+    collect_named(w->contentItem(), QStringLiteral("column"), columns);
+    if (columns.isEmpty()) {
+        return false;
+    }
+    return QMetaObject::invokeMethod(columns.first(), "positionViewAtEnd");
 }
 
 bool lognotes_close() {

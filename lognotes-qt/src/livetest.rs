@@ -142,11 +142,15 @@ pub fn run() -> ! {
         format!("blocks={:?}", blocks(&root)),
     );
 
-    // Scrolling to the end pulls in the next chunk of older days.
+    // Scrolling to the end pulls in the next chunk of older days. How many wheel events that takes
+    // depends on how tall the rows are, so scroll until the chunk lands rather than counting.
     let rows_before = driver::row_count();
-    for _ in 0..6 {
-        driver::scroll(-1200);
-        driver::wait_ms(200);
+    for _ in 0..4 {
+        driver::scroll_to_end();
+        driver::wait_ms(400);
+        if driver::row_count() > rows_before {
+            break;
+        }
     }
     driver::wait_ms(900);
     shot("09-scrolled");
@@ -254,6 +258,14 @@ pub fn run() -> ! {
         "clicked the unlinked mentions heading".to_string(),
     );
 
+    // A reference row is a summary: no syntax marks, and its page link is live.
+    let summary = driver::named_text(&QString::from("summaryRow"), 0).to_string();
+    check(
+        "a summary row renders its markdown with a live page link",
+        summary.contains("href=\"page:My Project\"") && !summary.contains("[["),
+        format!("html={summary:?}"),
+    );
+
     // The popup closed when we picked a page, so reopen it before choosing Journal.
     let switched_back = driver::click_named(&QString::from("pagesButton"), 0)
         && {
@@ -267,6 +279,98 @@ pub fn run() -> ! {
         "clicked Journal".to_string(),
     );
 
+    // ---- markdown -------------------------------------------------------------------------
+    // The stored text stays markdown; what changes is how the editor draws it, so every check here
+    // reads the *formats* a character ended up with, not just the picture.
+    driver::click_block(0);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::NONE);
+    driver::wait_ms(100);
+    driver::type_text(&QString::from(" **bold** and `code`"));
+    driver::wait_ms(700);
+    shot("18-markdown-typed");
+
+    // The block is plain ASCII, so a byte offset from `find` is also the UTF-16 position the editor
+    // counts in.
+    let typed = driver::editor_text(0).to_string();
+    let bold_at = typed.find("bold").expect("the bold word is in the block") as i32;
+    let code_at = typed.find("code").expect("the code word is in the block") as i32;
+    let bold_format = driver::editor_format(0, bold_at).to_string();
+    let code_format = driver::editor_format(0, code_at).to_string();
+    check(
+        "bold is drawn bold while the marks stay in the text",
+        bold_format.contains("weight=700") && typed.contains("**bold**"),
+        format!("format={bold_format} text={typed:?}"),
+    );
+    check(
+        "inline code is drawn in a fixed pitch",
+        code_format.contains("mono=1"),
+        format!("format={code_format}"),
+    );
+
+    // ---- a fence that spans lines, and the diagram it draws ---------------------------------
+    let blocks_before_fence = blocks(&root).len();
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("```mermaid"));
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("graph TD"));
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("  A --> B"));
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("```"));
+    driver::wait_ms(1800);
+    shot("19-diagram");
+
+    let fenced = blocks(&root);
+    check(
+        "shift+enter kept the whole fence inside one block",
+        blocks_before_fence == fenced.len() && fenced[0].contains("```mermaid") && fenced[0].contains('\n'),
+        format!("blocks={} fence={:?}", fenced.len(), fenced[0]),
+    );
+    let diagram = driver::named_text(&QString::from("diagram"), 0).to_string();
+    let drawn = diagram
+        .strip_prefix("file://")
+        .map(|path| std::path::Path::new(path).exists())
+        .unwrap_or(false);
+    check(
+        "the mermaid fence drew a diagram next to itself",
+        drawn,
+        format!("source={diagram}"),
+    );
+
+    // ---- a fence that does not parse -------------------------------------------------------
+    // Appended to the second block rather than split into a third: a split needs the caret and the row
+    // to agree, and this check is about the message, not about splitting.
+    driver::click_block(1);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::CTRL);
+    driver::wait_ms(100);
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("```mermaid"));
+    driver::press_key(key::RETURN, modifier::SHIFT);
+    driver::wait_ms(150);
+    driver::type_text(&QString::from("this is not a diagram"));
+    driver::wait_ms(1800);
+    shot("20-diagram-error");
+
+    let error = driver::named_text(&QString::from("diagramError"), 0).to_string();
+    check(
+        "a fence that does not parse says so in one quiet line",
+        error.starts_with("diagram error: ") && !error.contains('\n'),
+        format!("error={error:?}"),
+    );
+
+    // Leave the caret where the close test expects it: at the end of the first block.
+    driver::click_block(0);
+    driver::wait_ms(300);
+    driver::press_key(key::END, modifier::NONE);
+    driver::wait_ms(200);
+
     driver::close_window();
     driver::wait_ms(400);
     check(
@@ -278,8 +382,8 @@ pub fn run() -> ! {
     // Quit straight after a keystroke: the debounce has not fired, so only the close handler can
     // save it. This is the difference between losing and keeping the last thing you typed.
     let before_flush = blocks(&root);
-    // The view switch put the caret at the start of the first block; append at the end.
-    driver::press_key(key::END, modifier::NONE);
+    // Ctrl+End, not End: a block can hold several lines now, and End stops at the end of the line.
+    driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
     driver::type_text(&QString::from(" now"));
     driver::close_window();

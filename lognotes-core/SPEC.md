@@ -18,6 +18,9 @@ Turn commands into durable state and answer queries from it. It knows nothing ab
 did not create, or how a block is drawn. What it guarantees is that the database can never be left in a
 state the invariants in `architecture` forbid.
 
+It also reads block text: one markdown scanner answers what a block links to, how it should look, and
+which fences a diagram comes from, so the link table and the rendering cannot disagree.
+
 ## Boundary
 
 - **Allowed dependencies:** `rusqlite` (with bundled SQLite), the standard library, and small utility
@@ -157,6 +160,25 @@ Spans inside inline code (`` `…` ``) and fenced code are skipped — a code sa
 Link aliases and `#[[multi word tags]]` are not supported in the first build. Extraction replaces that
 block's derived rows wholesale, so deleting a link removes it.
 
+The scanning itself is `markdown::scan` below; extraction keeps only the page-naming links and drops
+markdown links, which point outside the graph.
+
+## Markdown
+
+`markdown` is the crate's one reading of block text, and everything that needs to know what a block means
+asks it: `scan` returns styled spans, the links and tags with the byte ranges they occupy, and the fences
+with their language and code. Spans are style *flags* — dim, bold, italic, strike, code, heading, link —
+so nesting composes (italic inside bold) and a caller picks what to do with each.
+
+Two rules make the rest of the app possible: syntax marks are their own dim spans, so a view can keep
+them (the editor) or drop them (a rendered summary) from the same scan; and `to_html` renders a block as
+one line of escaped HTML with the marks gone and links carrying `page:<name>` or their URL, which is what
+a read-only row shows. Every character of the note is escaped there, so nothing a note says can become
+markup.
+
+Offsets are bytes, as Rust slices are. UTF-16 positions — what a Qt text document counts in — are the
+bridge's business, not this crate's.
+
 ## Migrations
 
 `PRAGMA user_version` is the schema version. On open, steps run in order, each in its own transaction. A
@@ -195,3 +217,10 @@ and scheduled dates surviving a reindex.
 
 Still owed: restoring a moved subtree across pages keeping `block_link` and `block_fts` consistent (block
 reordering is not a capability yet).
+
+Markdown is covered separately in `markdown`'s own tests: each syntax's spans and their dim marks, nested
+emphasis, an unclosed marker staying plain, `snake_case` not italicising, links and tags with their
+ranges, a tag stopping at punctuation, a fence collecting its lines and hiding the links inside them, a
+fence still being typed, and every span landing on a character boundary. `to_html` is covered for
+escaping (a note containing markup shows that markup), dropped marks, one line per block, and
+`page:`/URL hrefs. `link_at` resolves a click to the link under it.

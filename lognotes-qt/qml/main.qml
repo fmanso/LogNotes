@@ -167,6 +167,20 @@ ApplicationWindow {
         return Qt.formatDate(new Date(iso + "T12:00:00"), "MMM d")
     }
 
+    // One place decides what following a link means: a page link opens that page, anything else leaves
+    // the app. Page links and tags share the `page:` scheme, so they behave the same everywhere.
+    function openLink(href) {
+        if (href.indexOf("page:") === 0) {
+            root.unlinkedExpanded = false
+            root.focusRow = -1
+            root.pendingViewFocus = true
+            root.rebuilding = true
+            journal.open_page(href.substring("page:".length))
+        } else if (href !== "") {
+            Qt.openUrlExternally(href)
+        }
+    }
+
     // Picking a date is one popup, one decision, Esc always backs out. Qt 6.12 ships Controls'
     // `Calendar` as a singleton that cannot be instantiated, so this is built from MonthGrid.
     Popup {
@@ -402,6 +416,7 @@ ApplicationWindow {
 
     ListView {
         id: list
+        objectName: "column"
         anchors.fill: parent
         anchors.margins: 28
         anchors.topMargin: 56
@@ -428,7 +443,7 @@ ApplicationWindow {
                     ? 0
                     : (rowItem.isHeading
                        ? sectionHeading.implicitHeight + 22
-                       : Math.max(blockRow.implicitHeight, 24))
+                       : blockRow.height + rowItem.diagramSpace)
 
             property alias blockEditor: editor
             property bool isBlock: kind === "block" || kind === "placeholder"
@@ -439,6 +454,8 @@ ApplicationWindow {
             property bool isReference: kind === "reference-row" || kind === "unlinked-row"
             property bool isCollapsedMention: kind === "unlinked-row" && !root.unlinkedExpanded
             property bool hovered: false
+            // A block's diagram is drawn under its line, so the row has to grow to hold it.
+            property real diagramSpace: diagramArea.visible ? diagramArea.implicitHeight + 8 : 0
 
             HoverHandler {
                 onHoveredChanged: rowItem.hovered = hovered
@@ -560,6 +577,20 @@ ApplicationWindow {
                     selectByMouse: true
                     activeFocusOnPress: true
 
+                    // Styling lives on this editor's own document, so the caret, the undo stack and the
+                    // markdown that gets saved are untouched by it.
+                    Component.onCompleted: journal.attach_highlighter(editor.textDocument)
+
+                    // A block is always in edit mode, so a plain click has to keep meaning "put the
+                    // caret here": only Ctrl+click navigates.
+                    TapHandler {
+                        acceptedModifiers: Qt.ControlModifier
+                        onSingleTapped: (event) => {
+                            const position = editor.positionAt(event.position.x, event.position.y)
+                            root.openLink(journal.link_at(editor.text, position))
+                        }
+                    }
+
                     // Restores the caret when the model rebuild hands focus back, and flushes a
                     // pending debounced save when the block is left.
                     onActiveFocusChanged: {
@@ -595,15 +626,26 @@ ApplicationWindow {
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
-                            root.rebuilding = true
-                            if (event.modifiers & Qt.ControlModifier) {
-                                // Ctrl+Enter marks the block; plain Enter splits it.
-                                journal.cycle_marker(index)
-                            } else {
-                                root.focusRow = index + 1
-                                root.focusCursor = 0
+                            if (event.modifiers & Qt.ShiftModifier) {
+                                // A line break inside the block: a fence or a diagram needs one, while
+                                // plain Enter must keep meaning "new block".
+                                editor.insert(editor.cursorPosition, "\n")
+                                root.focusRow = index
+                                root.focusCursor = editor.cursorPosition
                                 root.wantsFocus = true
-                                journal.submit_block(index, cursorPosition, text)
+                                root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
+                                debounce.restart()
+                            } else {
+                                root.rebuilding = true
+                                if (event.modifiers & Qt.ControlModifier) {
+                                    // Ctrl+Enter marks the block; plain Enter splits it.
+                                    journal.cycle_marker(index)
+                                } else {
+                                    root.focusRow = index + 1
+                                    root.focusCursor = 0
+                                    root.wantsFocus = true
+                                    journal.submit_block(index, cursorPosition, text)
+                                }
                             }
                             event.accepted = true
                         } else if (event.key === Qt.Key_S
@@ -661,13 +703,18 @@ ApplicationWindow {
                 // An agenda row is the same block seen from today: read it, or check it off here.
                 Label {
                     id: agendaText
+                    objectName: "summaryRow"
                     visible: rowItem.isAgenda || rowItem.isReference
                     anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
                     anchors.leftMargin: 8
                     anchors.right: sourceLabel.left
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
-                    text: model.text === "" ? qsTr("(empty block)") : model.text
+                    // Summary rows are not edited, so they show the finished text: marks dropped and
+                    // links live.
+                    text: model.html === "" ? qsTr("(empty block)") : model.html
+                    textFormat: Text.RichText
+                    onLinkActivated: (link) => root.openLink(link)
                     color: model.overdue ? "#a4443c" : "#242424"
                     font.pixelSize: 16
                     elide: Text.ElideRight
@@ -695,6 +742,45 @@ ApplicationWindow {
                     }
                     color: model.overdue ? "#a4443c" : "#8a857c"
                     font.pixelSize: 12
+                }
+            }
+
+            // A ```mermaid fence draws its diagram here, under the fence itself. A failed diagram keeps
+            // the fence as code and says why in one quiet line.
+            Column {
+                id: diagramArea
+                visible: (model.diagram !== "" || model.diagramError !== "")
+                         && !rowItem.isHeading && !rowItem.isCollapsedMention
+                anchors.top: blockRow.bottom
+                anchors.topMargin: 8
+                // A sibling, not the editor: an anchor target has to be a parent or a sibling.
+                anchors.left: blockRow.left
+                anchors.leftMargin: editor.x
+                anchors.right: blockRow.right
+                spacing: 6
+
+                Image {
+                    objectName: "diagram"
+                    visible: model.diagram !== ""
+                    source: model.diagram
+                    // Never blow a small diagram up to the column's width; only the wide ones shrink,
+                    // and a very tall one is capped so it cannot swallow the page.
+                    width: Math.min(implicitWidth, diagramArea.width)
+                    height: implicitWidth > 0
+                            ? Math.min(width * implicitHeight / implicitWidth, 420)
+                            : 0
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                }
+
+                Label {
+                    objectName: "diagramError"
+                    visible: model.diagramError !== ""
+                    text: model.diagramError
+                    color: "#a4443c"
+                    font.pixelSize: 12
+                    width: parent.width
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                 }
             }
         }

@@ -35,8 +35,12 @@ mod ffi {
         fn lognotes_editor_debug(index: i32) -> QString;
         #[rust_name = "click_named"]
         fn lognotes_click_named(name: &QString, index: i32) -> bool;
-        #[rust_name = "scroll"]
-        fn lognotes_scroll(angle_delta: i32) -> bool;
+        #[rust_name = "named_text"]
+        fn lognotes_named_text(name: &QString, index: i32) -> QString;
+        #[rust_name = "editor_format"]
+        fn lognotes_editor_format(index: i32, offset: i32) -> QString;
+        #[rust_name = "scroll_to_end"]
+        fn lognotes_scroll_to_end() -> bool;
         #[rust_name = "close_window"]
         fn lognotes_close() -> bool;
         #[rust_name = "journal_error"]

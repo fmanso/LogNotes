@@ -6,6 +6,7 @@
 //! See `lognotes-core/SPEC.md` for the contract this implements.
 
 mod error;
+pub mod markdown;
 mod model;
 mod order;
 mod store;

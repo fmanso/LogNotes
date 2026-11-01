@@ -42,8 +42,17 @@ QString lognotes_editor_debug(int index);
 // Clicks the centre of the index-th visible item with this objectName.
 bool lognotes_click_named(const QString& name, int index);
 
-// Scrolls the column by `angle_delta` wheel units; negative scrolls into the past.
-bool lognotes_scroll(int angle_delta);
+// Text shown by the index-th visible item with this objectName — a Label's text, an Image's source —
+// or an empty string. How a rendered summary row and a drawn diagram are checked.
+QString lognotes_named_text(const QString& name, int index);
+
+// What markdown styling was applied to one character of the index-th block editor: the character at
+// `offset` counts in UTF-16, as the editor's own positions do. Empty when there is no such character.
+QString lognotes_editor_format(int index, int offset);
+
+// Puts the column at its end, which is what pulls in an older chunk. Qt Quick ignores synthetic wheel
+// events under this compositor, so the harness drives the same end-of-column path directly.
+bool lognotes_scroll_to_end();
 
 // Closes the window, running its close handlers.
 bool lognotes_close();

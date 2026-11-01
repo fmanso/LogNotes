@@ -5,6 +5,7 @@
 //! rows back onto the GUI thread before touching the model. Nothing here holds a `Connection`, so the
 //! view cannot reach the database even by accident.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -13,8 +14,10 @@ use std::thread;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QModelIndex, QString, QVariant};
+use lognotes_core::markdown::{self, LinkKind};
 use lognotes_core::{AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, Store};
 
+use crate::diagram::{Diagrams, Drawn};
 use qobject::{Journal, QHash_i32_QByteArray, Role};
 
 /// Where the database lives, set by `main` before the window loads.
@@ -47,6 +50,13 @@ pub mod qobject {
 
         include!("cxx-qt-lib/qhash.h");
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
+
+        include!(<lognotes-qt/markdown_shim.h>);
+
+        /// Hand a block editor's document to the markdown highlighter. The document arrives as a
+        /// `QVariant` because QML will not convert a `QQuickTextDocument` to a `QObject` parameter.
+        #[rust_name = "install_highlighter"]
+        fn lognotes_install_highlighter(document: &QVariant) -> bool;
     }
 
     #[qenum(Journal)]
@@ -61,6 +71,12 @@ pub mod qobject {
         Scheduled,
         Source,
         Overdue,
+        /// A read-only row's text as escaped HTML: styled, with the markdown's own marks dropped.
+        Html,
+        /// `file://` URL of a block's drawn mermaid diagram, empty when it has none.
+        Diagram,
+        /// One line explaining why a diagram could not be drawn.
+        DiagramError,
     }
 
     unsafe extern "RustQt" {
@@ -135,6 +151,18 @@ pub mod qobject {
         #[qinvokable]
         fn open_page(self: Pin<&mut Self>, name: &QString);
 
+        /// Style a block editor's text as markdown. Called once per editor, as its delegate is built.
+        #[qinvokable]
+        fn attach_highlighter(self: Pin<&mut Self>, document: &QVariant);
+
+        /// The link under `position` in `text`, as `page:<name>` for a page link or a tag and the URL
+        /// itself for an external one. Empty when the caret is not on a link.
+        ///
+        /// `text` is the editor's live text, not the stored one: a link that has not been saved yet must
+        /// still be clickable.
+        #[qinvokable]
+        fn link_at(self: Pin<&mut Self>, text: &QString, position: i32) -> QString;
+
         /// The named pages, as a JSON array of strings, for the page switcher.
         #[qinvokable]
         fn page_names(self: Pin<&mut Self>) -> QString;
@@ -184,6 +212,11 @@ struct Row {
     scheduled: Option<String>,
     source: String,
     overdue: bool,
+    /// A read-only row's text, rendered from the same scan the editor styles with.
+    html: String,
+    /// A block's drawn diagram, as a `file://` URL.
+    diagram: String,
+    diagram_error: String,
 }
 
 impl Row {
@@ -268,6 +301,8 @@ struct Outcome {
     error: Option<String>,
     days: Vec<(String, Vec<BlockRow>)>,
     agenda: Vec<AgendaRow>,
+    /// Diagrams drawn for blocks on the worker thread, by block id.
+    diagrams: HashMap<i64, Drawn>,
     /// Set when the column is showing a named page: its name, its blocks, its references.
     page: Option<(String, Vec<BlockRow>, Vec<ReferenceRow>)>,
     /// JSON array of named pages, for the switcher.
@@ -335,6 +370,9 @@ impl qobject::Journal {
             )),
             Role::Source => QVariant::from(&QString::from(row.source.as_str())),
             Role::Overdue => QVariant::from(&row.overdue),
+            Role::Html => QVariant::from(&QString::from(row.html.as_str())),
+            Role::Diagram => QVariant::from(&QString::from(row.diagram.as_str())),
+            Role::DiagramError => QVariant::from(&QString::from(row.diagram_error.as_str())),
             _ => QVariant::default(),
         }
     }
@@ -351,6 +389,9 @@ impl qobject::Journal {
         hash.insert(Role::Scheduled.repr, QByteArray::from("scheduled"));
         hash.insert(Role::Source.repr, QByteArray::from("source"));
         hash.insert(Role::Overdue.repr, QByteArray::from("overdue"));
+        hash.insert(Role::Html.repr, QByteArray::from("html"));
+        hash.insert(Role::Diagram.repr, QByteArray::from("diagram"));
+        hash.insert(Role::DiagramError.repr, QByteArray::from("diagramError"));
         hash
     }
 
@@ -516,6 +557,24 @@ impl qobject::Journal {
         self.as_mut().dispatch(None);
     }
 
+    /// The highlighter needs nothing from the model: it rescans the editor's live text on every change,
+    /// which is what keeps the styling in step with typing that has not been saved yet.
+    fn attach_highlighter(self: Pin<&mut Self>, document: &QVariant) {
+        let _ = qobject::install_highlighter(document);
+    }
+
+    fn link_at(self: Pin<&mut Self>, text: &QString, position: i32) -> QString {
+        let text = text.to_string();
+        let Some(link) = markdown::link_at(&text, byte_offset(&text, position.max(0) as u32)) else {
+            return QString::from("");
+        };
+        let target = match link.kind {
+            LinkKind::Url => link.target,
+            LinkKind::Page | LinkKind::Tag => format!("page:{}", link.target),
+        };
+        QString::from(target.as_str())
+    }
+
     fn page_names(self: Pin<&mut Self>) -> QString {
         // Read on the GUI thread from the worker would need a round trip; the model keeps the last
         // known list instead, refreshed with every snapshot.
@@ -560,7 +619,7 @@ impl qobject::Journal {
             let mut rows = Vec::new();
             if let Some((name, blocks, references)) = &outcome.page {
                 rows.push(page_header(name));
-                rows.extend(day_rows(name, blocks).into_iter().skip(1));
+                rows.extend(day_rows(name, blocks, &outcome.diagrams).into_iter().skip(1));
                 rows.extend(reference_rows(references));
                 let mut rust = self.as_mut().rust_mut();
                 rust.rows = rows;
@@ -581,7 +640,7 @@ impl qobject::Journal {
                     // "Right under today's blocks": today is the newest day in the column.
                     rows.extend(agenda.iter().cloned());
                 }
-                rows.extend(day_rows(date, blocks));
+                rows.extend(day_rows(date, blocks, &outcome.diagrams));
             }
             if rows.is_empty() {
                 rows.extend(agenda.iter().cloned());
@@ -610,6 +669,8 @@ impl qobject::Journal {
 
 fn worker_loop(rx: mpsc::Receiver<Job>) {
     let mut store: Option<Store> = None;
+    // Diagrams are drawn here, off the GUI thread, and remembered by content hash.
+    let mut diagrams = Diagrams::default();
 
     while let Ok(job) = rx.recv() {
         match job {
@@ -621,7 +682,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 };
                 match opened {
                     Ok(opened) => {
-                        let outcome = snapshot(&opened, &dates, &mode);
+                        let outcome = snapshot(&opened, &dates, &mode, &mut diagrams);
                         store = Some(opened);
                         deliver(queue, outcome);
                     }
@@ -631,6 +692,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                             error: Some(error),
                             days: Vec::new(),
                             agenda: Vec::new(),
+                            diagrams: HashMap::new(),
                             page: None,
                             page_names: "[]".to_string(),
                             ready: false,
@@ -660,11 +722,12 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     None => Ok(()),
                 };
                 let outcome = match run {
-                    Ok(()) => snapshot(store, &dates, &mode),
+                    Ok(()) => snapshot(store, &dates, &mode, &mut diagrams),
                     Err(error) => Outcome {
                         error: Some(error),
                         days: Vec::new(),
                         agenda: Vec::new(),
+                        diagrams: HashMap::new(),
                         page: None,
                         page_names: page_names_json(store),
                         ready: true,
@@ -734,7 +797,7 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
     }
 }
 
-fn snapshot(store: &Store, dates: &[String], mode: &Mode) -> Outcome {
+fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagrams) -> Outcome {
     if let Mode::Page(name) = mode {
         let page = store.page_by_name(name).ok().flatten();
         let (blocks, references) = match &page {
@@ -744,10 +807,12 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode) -> Outcome {
             ),
             None => (Vec::new(), Vec::new()),
         };
+        let drawn = drawn_for(&blocks, diagrams);
         return Outcome {
             error: None,
             days: Vec::new(),
             agenda: Vec::new(),
+            diagrams: drawn,
             page: Some((name.clone(), blocks, references)),
             page_names: page_names_json(store),
             ready: true,
@@ -756,8 +821,7 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode) -> Outcome {
         };
     }
 
-
-    let days = dates
+    let days: Vec<(String, Vec<BlockRow>)> = dates
         .iter()
         .map(|date| {
             let blocks = store.day(date).map(|day| day.blocks).unwrap_or_default();
@@ -771,16 +835,34 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode) -> Outcome {
         .and_then(|today| store.agenda(today, AGENDA_HORIZON_DAYS).ok())
         .unwrap_or_default();
 
+    let drawn = days
+        .iter()
+        .flat_map(|(_, blocks)| drawn_for(blocks, diagrams))
+        .collect();
+
     Outcome {
         error: None,
         days,
         agenda,
+        diagrams: drawn,
         page: None,
         page_names: page_names_json(store),
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
     }
+}
+
+/// Draw the diagrams of every block that has a mermaid fence. Content-hashed, so a snapshot that changes
+/// one block elsewhere in the column redraws nothing.
+fn drawn_for(blocks: &[BlockRow], diagrams: &mut Diagrams) -> HashMap<i64, Drawn> {
+    let mut drawn = HashMap::new();
+    for block in blocks {
+        if let Some(diagram) = diagrams.for_text(&block.content) {
+            drawn.insert(block.id, diagram);
+        }
+    }
+    drawn
 }
 
 fn heading(date: &str) -> Row {
@@ -794,10 +876,13 @@ fn heading(date: &str) -> Row {
         scheduled: None,
         source: String::new(),
         overdue: false,
+        html: String::new(),
+        diagram: String::new(),
+        diagram_error: String::new(),
     }
 }
 
-fn day_rows(date: &str, blocks: &[BlockRow]) -> Vec<Row> {
+fn day_rows(date: &str, blocks: &[BlockRow], drawn: &HashMap<i64, Drawn>) -> Vec<Row> {
     let mut rows = vec![heading(date)];
 
     if blocks.is_empty() {
@@ -814,16 +899,22 @@ fn day_rows(date: &str, blocks: &[BlockRow]) -> Vec<Row> {
         return rows;
     }
 
-    rows.extend(blocks.iter().map(|block| Row {
-        kind: Kind::Block,
-        date: date.to_string(),
-        block_id: block.id as i32,
-        depth: block.depth,
-        text: block.content.clone(),
-        marker: block.marker,
-        scheduled: block.scheduled_date.clone(),
-        source: String::new(),
-        overdue: false,
+    rows.extend(blocks.iter().map(|block| {
+        let diagram = drawn.get(&block.id).cloned().unwrap_or_default();
+        Row {
+            kind: Kind::Block,
+            date: date.to_string(),
+            block_id: block.id as i32,
+            depth: block.depth,
+            text: block.content.clone(),
+            marker: block.marker,
+            scheduled: block.scheduled_date.clone(),
+            source: String::new(),
+            overdue: false,
+            html: String::new(),
+            diagram: diagram.source,
+            diagram_error: diagram.error,
+        }
     }));
     rows
 }
@@ -839,6 +930,9 @@ fn page_header(name: &str) -> Row {
         scheduled: None,
         source: String::new(),
         overdue: false,
+        html: String::new(),
+        diagram: String::new(),
+        diagram_error: String::new(),
     }
 }
 
@@ -885,6 +979,9 @@ fn section_row(kind: Kind, text: &str) -> Row {
         scheduled: None,
         source: String::new(),
         overdue: false,
+        html: String::new(),
+        diagram: String::new(),
+        diagram_error: String::new(),
     }
 }
 
@@ -894,6 +991,8 @@ fn reference_row(entry: &ReferenceRow, kind: Kind) -> Row {
         date: String::new(),
         block_id: entry.block.id as i32,
         depth: 0,
+        // A summary row has no editor, so its styling comes ready-made as HTML.
+        html: markdown::to_html(&entry.block.content),
         text: entry.block.content.clone(),
         marker: entry.block.marker,
         scheduled: None,
@@ -902,6 +1001,8 @@ fn reference_row(entry: &ReferenceRow, kind: Kind) -> Row {
             .clone()
             .unwrap_or_else(|| entry.page_name.clone()),
         overdue: false,
+        diagram: String::new(),
+        diagram_error: String::new(),
     }
 }
 
@@ -933,6 +1034,9 @@ fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
         scheduled: None,
         source: String::new(),
         overdue: false,
+        html: String::new(),
+        diagram: String::new(),
+        diagram_error: String::new(),
     }];
 
     rows.extend(agenda.iter().map(|entry| Row {
@@ -940,6 +1044,7 @@ fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
         date: entry.block.scheduled_date.clone().unwrap_or_default(),
         block_id: entry.block.id as i32,
         depth: 0,
+        html: markdown::to_html(&entry.block.content),
         text: entry.block.content.clone(),
         marker: entry.block.marker,
         scheduled: entry.block.scheduled_date.clone(),
@@ -948,6 +1053,8 @@ fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
             .clone()
             .unwrap_or_else(|| entry.page_name.clone()),
         overdue: entry.overdue,
+        diagram: String::new(),
+        diagram_error: String::new(),
     }));
     rows
 }
@@ -955,6 +1062,18 @@ fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
 fn today_chunk(count: u32) -> Vec<String> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     chunk_from(&today, count)
+}
+
+/// A QML caret position counts UTF-16 units; the markdown scanner counts bytes.
+fn byte_offset(text: &str, position: u32) -> usize {
+    let mut utf16 = 0;
+    for (byte, character) in text.char_indices() {
+        if utf16 >= position {
+            return byte;
+        }
+        utf16 += character.len_utf16() as u32;
+    }
+    text.len()
 }
 
 fn older_chunk(oldest: &str, count: u32) -> Vec<String> {
@@ -997,7 +1116,7 @@ mod tests {
 
     #[test]
     fn an_empty_day_renders_a_heading_and_one_placeholder() {
-        let rows = day_rows("2026-04-13", &[]);
+        let rows = day_rows("2026-04-13", &[], &HashMap::new());
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].kind, Kind::Heading);
@@ -1008,7 +1127,11 @@ mod tests {
 
     #[test]
     fn a_day_renders_its_blocks_under_the_heading_with_depth() {
-        let rows = day_rows("2026-04-13", &[block(7, 0, "one"), block(8, 1, "two")]);
+        let rows = day_rows(
+            "2026-04-13",
+            &[block(7, 0, "one"), block(8, 1, "two")],
+            &HashMap::new(),
+        );
 
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].kind, Kind::Heading);

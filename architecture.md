@@ -27,7 +27,7 @@ and one SQLite file as the only source of truth.
 ```mermaid
 flowchart LR
   qml[QML views<br/>journal · page · agenda] -->|commands + model binding| bridge[cxx-qt bridge<br/>QObject models, worker thread]
-  bridge -->|typed calls| core[lognotes-core<br/>model · store · queries]
+  bridge -->|typed calls| core[lognotes-core<br/>model · store · queries · markdown]
   core --> db[(SQLite file)]
 ```
 
@@ -57,6 +57,18 @@ The cost — key growth on repeated mid-inserts — is invisible at personal-not
 references into a link table and creates pages that don't exist yet. A block's text is the only truth
 about what it links to; the link table can be dropped and rebuilt from it at any time.
 
+**Markdown is read from the text, never stored beside it.** One scanner in core turns a block's text into
+styled spans, links and fences; the editor draws those spans as text formats on its own document, a
+read-only row draws them as escaped HTML, and a diagram is drawn from the fence's own content. Styling is
+layout, not content: the characters, the undo stack and the stored markdown are exactly what they were.
+The rejected alternatives are what make this the decision it is — a rich-text document, or a second
+styled copy of the text, would each give the app two truths about a block that can drift apart, and put
+the caret and the saved text at the mercy of a renderer.
+
+**A diagram is derived data with a name.** A ```mermaid fence is rendered to SVG on the worker thread and
+cached in the OS temp directory under a hash of its own content, so a snapshot — which happens after every
+edit anywhere — redraws nothing that has not changed, and a wiped cache costs one redraw.
+
 **One background worker thread owns the connection.** The bridge marshals every command to it and hands
 the UI an immutable snapshot of rows. This keeps the GUI thread off the disk, and gives a single writer,
 which removes the multi-writer contention that a UI thread plus background jobs would otherwise create.
@@ -80,6 +92,8 @@ not a view concern — so the same list can later appear elsewhere without reimp
 
 - A block has exactly one owning page; nesting is a tree within that page and never crosses pages.
 - Block text is canonical for links; the link table is derived and rebuildable from it.
+- What a block looks like is derived from its text: styling never changes a character, and a diagram is
+  named after the content that produced it, so both can be thrown away and recomputed.
 - `scheduled_date` is a calendar date in local time, never a timestamp with a timezone — "the 14th" means
   the 14th wherever the laptop is.
 - A block whose marker is `DONE` never appears in the scheduled section.
@@ -107,7 +121,8 @@ This is the only OS-specific surface in the codebase.
 
 One source tree builds both targets: cargo drives the build, cxx-qt generates the C++/Qt glue, and Qt 6
 plus a C++ toolchain are build-time requirements on both platforms. Qt is linked dynamically, both for
-the LGPL terms and because the system Qt on Linux is a shared library.
+the LGPL terms and because the system Qt on Linux is a shared library. Diagrams add one deployment
+requirement: Qt's SVG image plugin, without which a drawn diagram silently renders as nothing.
 
 ## Out of scope
 

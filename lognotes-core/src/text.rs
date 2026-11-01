@@ -4,6 +4,8 @@
 //! can be thrown away and rebuilt, which is why extraction runs on every write rather than being
 //! authored by a separate command.
 
+use crate::markdown::LinkKind;
+
 /// What a link names and how it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExtractedLink {
@@ -13,58 +15,21 @@ pub(crate) struct ExtractedLink {
 
 /// `[[Page Name]]` and `#tag`, in the order they appear, deduplicated by target.
 ///
-/// Spans inside inline code are skipped: a code sample that happens to contain `[[x]]` must not create a
-/// page. Aliases (`[label]([[target]])`) and `#[[multi word tags]]` are not supported yet.
+/// The scanning itself lives in [`crate::markdown`], which the editor's styling and the rendered
+/// summaries also read: one scanner means a code sample that contains `[[x]]` is neither a link nor
+/// styled like one, and the two can never drift apart. Markdown links (`[label](url)`) point outside the
+/// graph, so they are not page references.
 pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
     let mut links: Vec<ExtractedLink> = Vec::new();
-    let bytes: Vec<char> = content.chars().collect();
-    let mut index = 0;
-    let mut in_code = false;
-
-    while index < bytes.len() {
-        let character = bytes[index];
-
-        if character == '`' {
-            in_code = !in_code;
-            index += 1;
-            continue;
-        }
-        if in_code {
-            index += 1;
-            continue;
-        }
-
-        if character == '[' && index + 1 < bytes.len() && bytes[index + 1] == '[' {
-            if let Some(end) = find(&bytes, index + 2, "]]") {
-                let target: String = bytes[index + 2..end].iter().collect();
-                push(&mut links, target.trim(), "link");
-                index = end + 2;
-                continue;
-            }
-        }
-
-        if character == '#' {
-            let start = index + 1;
-            let mut end = start;
-            while end < bytes.len() && !bytes[end].is_whitespace() && !is_tag_break(bytes[end]) {
-                end += 1;
-            }
-            if end > start {
-                let target: String = bytes[start..end].iter().collect();
-                push(&mut links, target.trim_end_matches(&['.', ',', ';', ':'][..]), "tag");
-                index = end;
-                continue;
-            }
-        }
-
-        index += 1;
+    for link in crate::markdown::scan(content).links {
+        let kind = match link.kind {
+            LinkKind::Page => "link",
+            LinkKind::Tag => "tag",
+            LinkKind::Url => continue,
+        };
+        push(&mut links, &link.target, kind);
     }
-
     links
-}
-
-fn is_tag_break(character: char) -> bool {
-    matches!(character, '#' | '[' | ']' | '(' | ')' | '`')
 }
 
 /// Tags follow page-name rules: no spaces, no leading punctuation.
@@ -79,16 +44,6 @@ fn push(links: &mut Vec<ExtractedLink>, target: &str, kind: &'static str) {
         target: target.to_string(),
         kind,
     });
-}
-
-fn find(haystack: &[char], from: usize, needle: &str) -> Option<usize> {
-    let needle: Vec<char> = needle.chars().collect();
-    if from >= haystack.len() {
-        return None;
-    }
-    (from..haystack.len().saturating_sub(needle.len() - 1)).find(|start| {
-        haystack[*start..*start + needle.len()] == needle[..]
-    })
 }
 
 /// True when `needle` appears in `text` as whole words, case-insensitively.

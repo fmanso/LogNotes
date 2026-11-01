@@ -11,6 +11,9 @@ cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["full"] }
 lognotes-core = { path = "../lognotes-core" }
+# Draws ```mermaid fences to SVG on the worker thread. Default features off: the CLI and the PNG
+# rasteriser are not needed, the view renders the SVG itself.
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 
 [build-dependencies]
 cxx-qt-build = "0.10"
