@@ -5,7 +5,9 @@
 #include <QCoreApplication>
 #include <QList>
 #include <QEventLoop>
+#include <QGuiApplication>
 #include <QImage>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
@@ -42,6 +44,10 @@ bool lognotes_attach(const QQmlApplicationEngine& engine) {
         return false;
     }
     g_root = engine.rootObjects().first();
+    // An input method only delivers to an active window, so bring it up before anything composes.
+    if (auto* w = window()) {
+        w->requestActivate();
+    }
     return g_root != nullptr;
 }
 

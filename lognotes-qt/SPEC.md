@@ -152,6 +152,12 @@ and it keeps the database path the only OS-specific location in the codebase.
   fall back to a deferred attempt only when the row's delegate is not instantiated yet. A keystroke typed
   inside the round trip of a split — before the new block exists — is still dropped; at human typing speed
   the split has landed.
+- **A save waits for an input method to finish composing.** While `inputMethodComposing` is true the
+  debounced save is held back and restarted when it clears, because saving rebuilds the model, the rebuild
+  replaces the editor holding the composition, and the composed character goes with it. This one is stated
+  from the mechanism rather than from a test: Qt Quick ignores a synthesised input-method event, so the
+  harness cannot exercise the path — a dead key on the Spanish layout, which is what ` is there, is the
+  case it exists for.
 - **Markdown is applied as text formats, never as content.** A `QSyntaxHighlighter` is attached to each
   block editor's document and rescans that document's own text on every change, so a link still being
   typed is already styled and nothing waits for the debounced save. Formats carry the resolved weight,

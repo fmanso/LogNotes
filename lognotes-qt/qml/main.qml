@@ -647,7 +647,19 @@ ApplicationWindow {
                         root.focusCursor = cursorPosition
                         root.wantsFocus = true
                         root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
-                        debounce.restart()
+                        // An input method composes a character before it is text — a dead key on the
+                        // Spanish layout is one — and saving now would rebuild the model, destroy the
+                        // editor holding the composition, and take the character with it. Wait for the
+                        // composition to finish; that is when the text is really typed.
+                        if (!editor.inputMethodComposing) {
+                            debounce.restart()
+                        }
+                    }
+
+                    onInputMethodComposingChanged: {
+                        if (!inputMethodComposing) {
+                            debounce.restart()
+                        }
                     }
 
                     Keys.onPressed: (event) => {
