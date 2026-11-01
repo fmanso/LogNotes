@@ -50,6 +50,9 @@ QString lognotes_named_text(const QString& name, int index);
 // that row is being edited or holds no link.
 bool lognotes_click_link(int index);
 
+// Whether any item with this objectName is on screen — how the sidebar's toggle is checked.
+bool lognotes_visible(const QString& name);
+
 // The HTML the index-th block row renders at rest — what the markdown, or a coloured fence, produced.
 QString lognotes_row_html(int index);
 
@@ -62,6 +65,10 @@ bool lognotes_scroll_to_end();
 
 // Closes the window, running its close handlers.
 bool lognotes_close();
+
+// Any string property of the journal model, by name — how the theme, the sidebar and the current page's
+// star are checked.
+QString lognotes_journal_property(const QString& name);
 
 // The journal model's `error` text, empty when it opened fine.
 QString lognotes_journal_error();

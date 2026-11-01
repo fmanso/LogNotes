@@ -243,6 +243,7 @@ bool lognotes_click_named(const QString& name, int index) {
     }
     QList<QQuickItem*> matches;
     collect_named(w->contentItem(), name, matches);
+
     if (index < 0 || index >= matches.size()) {
         return false;
     }
@@ -265,6 +266,7 @@ QString lognotes_named_text(const QString& name, int index) {
     }
     QList<QQuickItem*> matches;
     collect_named(w->contentItem(), name, matches);
+
     if (index < 0 || index >= matches.size()) {
         return QString();
     }
@@ -318,6 +320,16 @@ bool lognotes_click_link(int index) {
     return false;
 }
 
+bool lognotes_visible(const QString& name) {
+    auto* w = window();
+    if (!w) {
+        return false;
+    }
+    QList<QQuickItem*> matches;
+    collect_named(w->contentItem(), name, matches);
+    return !matches.isEmpty();
+}
+
 QString lognotes_row_html(int row) {
     const auto rows = block_rows();
     if (row < 0 || row >= rows.size()) {
@@ -357,6 +369,11 @@ bool lognotes_scroll_to_end() {
 bool lognotes_close() {
     auto* w = window();
     return w ? w->close() : false;
+}
+
+QString lognotes_journal_property(const QString& name) {
+    auto* model = journal_model();
+    return model ? model->property(name.toUtf8().constData()).toString() : QString();
 }
 
 QString lognotes_journal_error() {

@@ -37,12 +37,26 @@ const AGENDA_HORIZON_DAYS: u32 = 7;
 
 /// The colours a rendered code fence uses: the app's own palette, and the only place HTML colour is
 /// chosen. They are passed into the renderer because Qt's rich text takes colours inline only.
-const CODE_COLOURS: markdown::CodeColours<'_> = markdown::CodeColours {
+const CODE_LIGHT: markdown::CodeColours<'_> = markdown::CodeColours {
     keyword: "#3a6ea5",
     string: "#4a7c59",
     comment: "#a39c90",
     number: "#a4443c",
 };
+
+const CODE_DARK: markdown::CodeColours<'_> = markdown::CodeColours {
+    keyword: "#8fb6e8",
+    string: "#8fc79c",
+    comment: "#8f8a80",
+    number: "#e0948a",
+};
+
+fn code_colours(theme: &str) -> &'static markdown::CodeColours<'static> {
+    if theme == "dark" { &CODE_DARK } else { &CODE_LIGHT }
+}
+
+/// How many recently opened pages the sidebar remembers.
+const SIDEBAR_RECENT: usize = 8;
 
 /// How many page names and how many blocks the quick switcher shows for one query.
 const SEARCH_PAGES: usize = 5;
@@ -97,6 +111,9 @@ pub mod qobject {
         #[qproperty(bool, can_redo)]
         #[qproperty(u64, revision)]
         #[qproperty(QString, hits)]
+        #[qproperty(QString, theme)]
+        #[qproperty(QString, sidebar)]
+        #[qproperty(bool, page_favourite)]
         #[qproperty(i32, focus_row)]
         type Journal = super::JournalRust;
 
@@ -199,9 +216,14 @@ pub mod qobject {
         #[qinvokable]
         fn clear_focus_row(self: Pin<&mut Self>);
 
-        /// The named pages, as a JSON array of strings, for the page switcher.
+        /// Switch the window between light and dark, and remember it.
         #[qinvokable]
-        fn page_names(self: Pin<&mut Self>) -> QString;
+        fn apply_theme(self: Pin<&mut Self>, name: &QString);
+
+        /// Star or unstar a page: what the page header's star does, and what fills the
+        /// sidebar's Favourites.
+        #[qinvokable]
+        fn toggle_favourite(self: Pin<&mut Self>, name: &QString, favourite: bool);
 
         #[qinvokable]
         fn undo(self: Pin<&mut Self>);
@@ -279,15 +301,18 @@ pub struct JournalRust {
     ready: bool,
     can_undo: bool,
     can_redo: bool,
-    /// JSON array of the named pages, refreshed with every snapshot so the switcher can read it
-    /// without a round trip to the worker.
-    page_names: String,
     /// Bumped on every applied snapshot. QML restores the caret from this: the row count alone does not
     /// change when a block is merely edited, so `countChanged` cannot be the trigger.
     revision: u64,
     /// The last search answer, as `{"error": "…", "hits": […]}`. Its own signal is what tells the view
     /// to rebuild, so no counter is needed.
     hits: QString,
+    /// "light" or "dark", from the store's settings.
+    theme: QString,
+    /// The sidebar as `{"favourites": […], "recent": […]}`, refreshed with every snapshot.
+    sidebar: QString,
+    /// Whether the page in view is starred, for the star in its header.
+    page_favourite: bool,
     /// A block a search asked for, to be turned into a row once a snapshot containing it arrives.
     pending_focus: i32,
     /// The row the view should put the caret in, or -1.
@@ -315,8 +340,11 @@ enum Command {
     Update { block_id: i32, text: String },
     Materialize { destination: Destination, text: String },
     Submit { destination: Destination, block_id: i32, text: String, offset: usize },
-    /// Create a page if it does not exist — what opening one from a link calls first.
-    EnsurePage { name: String },
+    /// Create a page if it does not exist and record the visit — what opening one does, whether the
+    /// name came from a link or the sidebar.
+    OpenPage { name: String },
+    SetTheme { name: String },
+    SetFavourite { name: String, favourite: bool },
     Indent { block_id: i32 },
     Outdent { block_id: i32 },
     Delete { block_id: i32 },
@@ -358,8 +386,13 @@ struct Outcome {
     diagrams: HashMap<i64, Drawn>,
     /// Set when the column is showing a named page: its name, its blocks, its references.
     page: Option<(String, Vec<BlockRow>, Vec<ReferenceRow>)>,
-    /// JSON array of named pages, for the switcher.
-    page_names: String,
+    /// The sidebar as `{"favourites": […], "recent": […]}`.
+    sidebar: String,
+    /// "light" or "dark", from the store's settings.
+    theme: String,
+    /// Whether the page in view is starred.
+    page_favourite: bool,
+
     ready: bool,
     can_undo: bool,
     can_redo: bool,
@@ -609,8 +642,7 @@ impl qobject::Journal {
         self.as_mut().rust_mut().mode = Mode::Page(name.clone());
         // Opening a page from a link can name one that was never written: create it, so the click lands
         // on a page you can type in rather than on an empty view that refuses a keystroke.
-        self.as_mut()
-            .dispatch(Some(Command::EnsurePage { name }));
+        self.as_mut().dispatch(Some(Command::OpenPage { name }));
     }
 
     fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool {
@@ -672,15 +704,39 @@ impl qobject::Journal {
         self.as_mut().set_focus_row(-1);
     }
 
+    fn apply_theme(mut self: Pin<&mut Self>, name: &QString) {
+        let name = if name.to_string() == "dark" { "dark" } else { "light" };
+        // Show it at once; the write only has to reach the store before the next launch.
+        self.as_mut().set_theme(QString::from(name));
+
+        let dates = self.dates.clone();
+        if dates.is_empty() || self.worker.is_none() {
+            return;
+        }
+        let queue = self.as_mut().qt_thread();
+        let mode = self.mode.clone();
+        self.send(Job::Run {
+            command: Some(Command::SetTheme {
+                name: name.to_string(),
+            }),
+            dates,
+            mode,
+            queue,
+        });
+    }
+
+    fn toggle_favourite(mut self: Pin<&mut Self>, name: &QString, favourite: bool) {
+        let name = name.to_string();
+        if name.trim().is_empty() {
+            return;
+        }
+        self.as_mut()
+            .dispatch(Some(Command::SetFavourite { name, favourite }));
+    }
+
     /// Called on the GUI thread when a search answer arrives.
     fn apply_search(mut self: Pin<&mut Self>, json: String) {
         self.as_mut().set_hits(QString::from(json.as_str()));
-    }
-
-    fn page_names(self: Pin<&mut Self>) -> QString {
-        // Read on the GUI thread from the worker would need a round trip; the model keeps the last
-        // known list instead, refreshed with every snapshot.
-        QString::from(self.page_names.as_str())
     }
 
     fn undo(mut self: Pin<&mut Self>) {
@@ -717,13 +773,17 @@ impl qobject::Journal {
 
         self.as_mut().begin_reset_model();
         let pending = self.pending_focus;
-        let mut focus = -1;
+        let focus;
         {
             let agenda = agenda_rows(&outcome.agenda);
             let mut rows = Vec::new();
             if let Some((name, blocks, references)) = &outcome.page {
                 rows.push(page_header(name));
-                rows.extend(day_rows(name, blocks, &outcome.diagrams).into_iter().skip(1));
+                rows.extend(
+                    day_rows(name, blocks, &outcome.diagrams, &outcome.theme)
+                        .into_iter()
+                        .skip(1),
+                );
                 rows.extend(reference_rows(references));
                 focus = row_of_block(&rows, pending);
                 let mut rust = self.as_mut().rust_mut();
@@ -731,13 +791,15 @@ impl qobject::Journal {
                 rust.rows = rows;
                 rust.can_undo = outcome.can_undo;
                 rust.can_redo = outcome.can_redo;
-                rust.page_names = outcome.page_names.clone();
                 drop(rust);
                 self.as_mut().end_reset_model();
                 self.as_mut().set_error(QString::from(""));
                 self.as_mut().set_ready(true);
                 self.as_mut().set_can_undo(outcome.can_undo);
                 self.as_mut().set_can_redo(outcome.can_redo);
+                self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
+                self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+                self.as_mut().set_page_favourite(outcome.page_favourite);
                 self.as_mut().set_focus_row(focus);
                 self.as_mut().bump_revision();
                 return;
@@ -747,7 +809,7 @@ impl qobject::Journal {
                     // "Right under today's blocks": today is the newest day in the column.
                     rows.extend(agenda.iter().cloned());
                 }
-                rows.extend(day_rows(date, blocks, &outcome.diagrams));
+                rows.extend(day_rows(date, blocks, &outcome.diagrams, &outcome.theme));
             }
             if rows.is_empty() {
                 rows.extend(agenda.iter().cloned());
@@ -759,7 +821,6 @@ impl qobject::Journal {
             rust.rows = rows;
             rust.can_undo = outcome.can_undo;
             rust.can_redo = outcome.can_redo;
-            rust.page_names = outcome.page_names.clone();
         }
         self.as_mut().end_reset_model();
 
@@ -767,6 +828,9 @@ impl qobject::Journal {
         self.as_mut().set_ready(outcome.ready);
         self.as_mut().set_can_undo(outcome.can_undo);
         self.as_mut().set_can_redo(outcome.can_redo);
+        self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
+        self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+        self.as_mut().set_page_favourite(outcome.page_favourite);
         self.as_mut().set_focus_row(focus);
         self.as_mut().bump_revision();
     }
@@ -792,7 +856,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 };
                 match opened {
                     Ok(opened) => {
-                        let outcome = snapshot(&opened, &dates, &mode, &mut diagrams);
+                        let theme = theme_name(&opened);
+                        let outcome = snapshot(&opened, &dates, &mode, &mut diagrams, &theme);
                         store = Some(opened);
                         deliver(queue, outcome);
                     }
@@ -804,7 +869,9 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                             agenda: Vec::new(),
                             diagrams: HashMap::new(),
                             page: None,
-                            page_names: "[]".to_string(),
+                            sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
+                            theme: "light".to_string(),
+                            page_favourite: false,
                             ready: false,
                             can_undo: false,
                             can_redo: false,
@@ -820,7 +887,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     },
                     None => search_failed("the database is not open"),
                 };
-                let _ = queue.queue(move |mut journal: Pin<&mut Journal>| journal.apply_search(json));
+                let _ = queue.queue(move |journal: Pin<&mut Journal>| journal.apply_search(json));
             }
             Job::Flush { command, done } => {
                 if let Some(store) = store.as_mut() {
@@ -842,14 +909,19 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     None => Ok(()),
                 };
                 let outcome = match run {
-                    Ok(()) => snapshot(store, &dates, &mode, &mut diagrams),
+                    Ok(()) => {
+                        let theme = theme_name(store);
+                        snapshot(store, &dates, &mode, &mut diagrams, &theme)
+                    }
                     Err(error) => Outcome {
                         error: Some(error),
                         days: Vec::new(),
                         agenda: Vec::new(),
                         diagrams: HashMap::new(),
                         page: None,
-                        page_names: page_names_json(store),
+                        sidebar: sidebar_json(store),
+                        theme: theme_name(store),
+                        page_favourite: false,
                         ready: true,
                         can_undo: store.can_undo(),
                         can_redo: store.can_redo(),
@@ -870,7 +942,18 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
 
     match command {
         Command::Update { block_id, text } => store.update_content(block_id as i64, &text).map_err(fail),
-        Command::EnsurePage { name } => store.ensure_page(&name).map(|_| ()).map_err(fail),
+        Command::OpenPage { name } => {
+            // Opening a page from a link can name one that was never written: create it, so the
+            // click lands on a page you can type in, and record the visit for the sidebar.
+            let page = store.ensure_page(&name).map_err(fail)?;
+            store.record_visit(page).map_err(fail)?;
+            Ok(())
+        }
+        Command::SetTheme { name } => store.set_setting("theme", &name).map_err(fail),
+        Command::SetFavourite { name, favourite } => {
+            let page = store.ensure_page(&name).map_err(fail)?;
+            store.set_favourite(page, favourite).map_err(fail)
+        }
         Command::Materialize {
             destination,
             text,
@@ -930,7 +1013,13 @@ fn page_for(store: &mut Store, destination: &Destination) -> Result<i64, String>
     }
 }
 
-fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagrams) -> Outcome {
+fn snapshot(
+    store: &Store,
+    dates: &[String],
+    mode: &Mode,
+    diagrams: &mut Diagrams,
+    theme: &str,
+) -> Outcome {
     if let Mode::Page(name) = mode {
         let page = store.page_by_name(name).ok().flatten();
         let (blocks, references) = match &page {
@@ -940,14 +1029,19 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagram
             ),
             None => (Vec::new(), Vec::new()),
         };
-        let drawn = drawn_for(&blocks, diagrams);
+        let drawn = drawn_for(&blocks, diagrams, theme);
         return Outcome {
             error: None,
             days: Vec::new(),
             agenda: Vec::new(),
             diagrams: drawn,
             page: Some((name.clone(), blocks, references)),
-            page_names: page_names_json(store),
+            sidebar: sidebar_json(store),
+            theme: theme.to_string(),
+            page_favourite: page
+                .as_ref()
+                .and_then(|page| store.is_favourite(page.id).ok())
+                .unwrap_or(false),
             ready: true,
             can_undo: store.can_undo(),
             can_redo: store.can_redo(),
@@ -970,7 +1064,7 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagram
 
     let drawn = days
         .iter()
-        .flat_map(|(_, blocks)| drawn_for(blocks, diagrams))
+        .flat_map(|(_, blocks)| drawn_for(blocks, diagrams, theme))
         .collect();
 
     Outcome {
@@ -979,7 +1073,9 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagram
         agenda,
         diagrams: drawn,
         page: None,
-        page_names: page_names_json(store),
+        sidebar: sidebar_json(store),
+        theme: theme.to_string(),
+        page_favourite: false,
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
@@ -988,10 +1084,14 @@ fn snapshot(store: &Store, dates: &[String], mode: &Mode, diagrams: &mut Diagram
 
 /// Draw the diagrams of every block that has a mermaid fence. Content-hashed, so a snapshot that changes
 /// one block elsewhere in the column redraws nothing.
-fn drawn_for(blocks: &[BlockRow], diagrams: &mut Diagrams) -> HashMap<i64, Drawn> {
+fn drawn_for(
+    blocks: &[BlockRow],
+    diagrams: &mut Diagrams,
+    theme: &str,
+) -> HashMap<i64, Drawn> {
     let mut drawn = HashMap::new();
     for block in blocks {
-        if let Some(diagram) = diagrams.for_text(&block.content) {
+        if let Some(diagram) = diagrams.for_text(&block.content, theme) {
             drawn.insert(block.id, diagram);
         }
     }
@@ -1015,7 +1115,12 @@ fn heading(date: &str) -> Row {
     }
 }
 
-fn day_rows(date: &str, blocks: &[BlockRow], drawn: &HashMap<i64, Drawn>) -> Vec<Row> {
+fn day_rows(
+    date: &str,
+    blocks: &[BlockRow],
+    drawn: &HashMap<i64, Drawn>,
+    theme: &str,
+) -> Vec<Row> {
     let mut rows = vec![heading(date)];
 
     if blocks.is_empty() {
@@ -1041,7 +1146,7 @@ fn day_rows(date: &str, blocks: &[BlockRow], drawn: &HashMap<i64, Drawn>) -> Vec
             depth: block.depth,
             // A block is shown as this until it is clicked, so it keeps its line breaks — a fence has to
             // still read as a block of code.
-            html: markdown::to_html_block(&block.content, &CODE_COLOURS),
+            html: markdown::to_html_block(&block.content, code_colours(theme)),
             text: block.content.clone(),
             marker: block.marker,
             scheduled: block.scheduled_date.clone(),
@@ -1206,16 +1311,28 @@ fn json_string(value: &str) -> String {
     out
 }
 
-fn page_names_json(store: &Store) -> String {
-    let names: Vec<String> = store
-        .pages()
-        .map(|pages| pages.into_iter().map(|page| page.name).collect())
-        .unwrap_or_default();
-    let quoted: Vec<String> = names
-        .iter()
-        .map(|name| format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect();
-    format!("[{}]", quoted.join(","))
+fn theme_name(store: &Store) -> String {
+    store
+        .setting("theme")
+        .ok()
+        .flatten()
+        .filter(|name| name == "dark")
+        .unwrap_or_else(|| "light".to_string())
+}
+
+/// The sidebar as the view reads it: the starred pages, then the most recently opened ones.
+fn sidebar_json(store: &Store) -> String {
+    let names = |pages: Vec<lognotes_core::Page>| -> String {
+        let quoted: Vec<String> = pages
+            .iter()
+            .map(|page| json_string(&page.name))
+            .collect();
+        format!("[{}]", quoted.join(","))
+    };
+
+    let favourites = names(store.pages_by_favourite().unwrap_or_default());
+    let recent = names(store.recent_pages(SIDEBAR_RECENT).unwrap_or_default());
+    format!("{{\"favourites\":{favourites},\"recent\":{recent}}}")
 }
 
 /// The scheduled section that sits directly under today's blocks. Absent entirely when nothing is due.
@@ -1316,7 +1433,7 @@ mod tests {
 
     #[test]
     fn an_empty_day_renders_a_heading_and_one_placeholder() {
-        let rows = day_rows("2026-04-13", &[], &HashMap::new());
+        let rows = day_rows("2026-04-13", &[], &HashMap::new(), "light");
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].kind, Kind::Heading);
@@ -1331,6 +1448,7 @@ mod tests {
             "2026-04-13",
             &[block(7, 0, "one"), block(8, 1, "two")],
             &HashMap::new(),
+            "light",
         );
 
         assert_eq!(rows.len(), 3);
@@ -1413,7 +1531,7 @@ mod tests {
         let mut store = session();
         run_command(
             &mut store,
-            Command::EnsurePage {
+            Command::OpenPage {
                 name: "Fresh Page".into(),
             },
         )
@@ -1432,7 +1550,7 @@ mod tests {
         let mut store = session();
         run_command(
             &mut store,
-            Command::EnsurePage {
+            Command::OpenPage {
                 name: "Fresh Page".into(),
             },
         )

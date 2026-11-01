@@ -57,7 +57,11 @@ Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `
 `overdue`, `html`, `diagram`, `diagramError`. Dates stay ISO `YYYY-MM-DD` in the
 model and are formatted in QML — the core never learns a locale, and the view never parses a date.
 
-Two more properties belong to the quick switcher rather than to a row: `hits` is the last search answer as
+Three more properties belong to the shell rather than to a row: `theme` ("light" or "dark", from the
+store's settings), `sidebar` (the two lists as `{"favourites": […], "recent": […]}`), and
+`page_favourite` (whether the page in view is starred).
+
+Two more belong to the quick switcher: `hits` is the last search answer as
 `{"error": "…", "hits": […]}` (its own change signal is what rebuilds the list, so no counter is needed),
 and `focus_row` is the row a search hit asked the caret to go to, -1 when none.
 
@@ -190,6 +194,22 @@ and it keeps the database path the only OS-specific location in the codebase.
   rescans the *editor's* text rather than the stored one, so an unsaved link is clickable too. One
   function, `openLink`, decides what a `page:` href or a URL does, for the editor and for read-only rows
   alike.
+- **One palette, keyed by theme.** Every colour in the window is a role on a `QtObject` (`page`, `panel`,
+  `rule`, `border`, `text`, muted and faint text, `hover`, `accent`, `danger`, `success`, `warning`,
+  `markerIdle`, `scrim`), computed from `root.darkTheme`. A third theme would be another table of roles,
+  not a sweep through the file. The theme is read from the store, so the window fades in once the first
+  snapshot arrives — `opacity`, not `visible`: a window hidden and then shown gets tiled by the
+  compositor, which changes every layout assumption in the app.
+- **The bar and the sidebar are the shell.** The bar holds the wordmark, the search field, a Journal
+  button, a sidebar toggle and the theme toggle; typing in the field opens the results just under it, and
+  `Ctrl+K` only puts the caret there. The sidebar lists Favourites then Recent (eight), and the Pages
+  popup is gone — one way to reach a page, not two. A page is starred from the star in its own header.
+- **`Ctrl+K` and `Ctrl+B` are claimed in the delegate.** `TextEdit` binds them to delete-to-end-of-line
+  and bold, so the window shortcuts alone would edit your text instead of opening the switcher or hiding
+  the sidebar whenever the caret is in a block.
+- **The list keeps no off-screen delegates.** `cacheBuffer: 0` on the column, because every save rebuilds
+  the model and a cached delegate from before the rebuild lingers in the tree — invisible on screen,
+  but findable by anything that walks it, which is how the live test first clicked a stale star.
 - **Search is one overlay over the whole graph.** `Ctrl+K` opens a modal with one field; typing asks core
   (120 ms after the last keystroke) and the answer lands in `hits`, which QML turns into a `ListModel` of
   page hits and then block hits, each with where it lives — `today`, a date, or a page name. `Up`/`Down`
@@ -246,9 +266,10 @@ mentions, typing `**bold**` and `code` and reading back the *formats* the editor
 to see it render and clicking it to see its marks come back, typing immediately after that click and again
 after Enter to prove no keystroke is eaten, typing ``` in a fresh block to start a code block, building the
 fence with plain Enter once it is open and checking the diagram it drew, a fence that does not parse and the
-one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, a python fence read back as coloured
-HTML, clicking a link in a block at rest and typing on the page it opened, and finally a close with a
-pending debounce. Each step is checked against the
+one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, a python fence read back as
+coloured HTML, starring a page and reading the sidebar back, hiding the sidebar with Ctrl+B, switching
+the theme to dark and back, clicking a link in a block at rest and typing on the page it opened, and
+finally a close with a pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 
@@ -267,8 +288,10 @@ constant in the harness looks exactly like an application bug.
 
 The `driver` feature is the boundary: without it, `src/driver.rs`, `driver_shim.cpp` and `livetest.rs` are
 not compiled and the shipped binary carries no test hook. Besides the input helpers it exposes two
-readers: the text or source of a named item (`named_text`, for a summary row and a diagram's URL), the HTML
-a block row renders (`row_html`), and how many rows the quick switcher is showing (`search_count`). It can
+readers: the text or source of a named item (`named_text`, for a summary row and a diagram's URL), the
+HTML a block row renders (`row_html`), any string property of the model (`journal_property` — the theme,
+the sidebar, the star), whether a named item is on screen (`visible`), and how many rows the quick
+switcher is showing (`search_count`). It can
 also click a real link inside a block at rest (`click_link`), found with the view's own hit test rather than
 guessed at. Its block helpers address a
 row and then pick the view inside it, because a block may be showing either the editor or its rendered form,

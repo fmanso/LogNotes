@@ -39,6 +39,8 @@ mod ffi {
         fn lognotes_named_text(name: &QString, index: i32) -> QString;
         #[rust_name = "click_link"]
         fn lognotes_click_link(index: i32) -> bool;
+        #[rust_name = "visible"]
+        fn lognotes_visible(name: &QString) -> bool;
         #[rust_name = "row_html"]
         fn lognotes_row_html(index: i32) -> QString;
         #[rust_name = "search_count"]
@@ -47,6 +49,8 @@ mod ffi {
         fn lognotes_scroll_to_end() -> bool;
         #[rust_name = "close_window"]
         fn lognotes_close() -> bool;
+        #[rust_name = "journal_property"]
+        fn lognotes_journal_property(name: &QString) -> QString;
         #[rust_name = "journal_error"]
         fn lognotes_journal_error() -> QString;
         #[rust_name = "journal_ready"]
@@ -69,6 +73,7 @@ pub mod key {
     pub const END: i32 = 0x0100_0011;
     pub const S: i32 = 0x53;
     pub const K: i32 = 0x4B;
+    pub const B: i32 = 0x42;
 }
 
 pub mod modifier {

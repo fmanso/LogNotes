@@ -76,6 +76,13 @@ CREATE INDEX block_link_page ON block_link (page_id);
 CREATE VIRTUAL TABLE block_fts USING fts5 (content, content = 'block', content_rowid = 'id');
 ```
 
+**v3** adds `page.favourite`, `page.visit_order` and a `setting` table. A page can be starred for the
+sidebar; it remembers the order it was opened in as a *counter*, not a clock — two pages opened in the
+same millisecond still have a definite order, and a clock that jumps backwards cannot reshuffle the
+list; and the app keeps its own settings (the theme) in the same file as the notes, so "the database is
+the only persistent state" stays true. Starring and visiting stay outside the undo history: a star is
+not an edit to a note, and neither is opening one.
+
 Two conventions the schema encodes deliberately:
 
 - **Dates are text in `YYYY-MM-DD`.** Lexicographic order is calendar order, so range predicates stay
@@ -107,6 +114,8 @@ ever visible.
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
 | `move(block, page, after)` | Moves a block (with its subtree) between pages or positions. |
 | `delete_block(block)` | Removes the block and its subtree. |
+| `set_favourite(page, bool)` | Stars or unstars a page. Outside the undo history. |
+| `record_visit(page)` | Records that a page was opened, by bumping a counter. Outside the undo history. |
 | `set_collapsed(block, bool)` | Persists fold state. |
 | `undo()` / `redo()` | Apply the recorded inverse (or replay it) and return whether anything happened. |
 
@@ -123,6 +132,10 @@ cursor is worse than one that lingers.
 | `pages()` | Every `kind = 'page'` page, ordered by `name_key` — the page switcher's list. Journal days are excluded: they are reached by scrolling, not by name. |
 | `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
+| `pages_by_favourite()` | The starred pages, by name — the sidebar's Favourites. Journal days are never among them. |
+| `recent_pages(limit)` | Named pages ordered by `visit_order`, newest first — the sidebar's Recent. Ordering is exact because it is a counter, not a timestamp. |
+| `is_favourite(page)` | Whether a page is starred, for the star in its header. |
+| `setting(key)` / `set_setting(key, value)` | The app's own settings, `theme` today. A missing key is `None`, not an error. |
 | `search(query, page_limit, block_limit)` | `SearchResults`: pages whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date and a window of its text around the match. |
 | `page_of_block(block)` | The page a block belongs to — what the view needs to show a block a search found. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
@@ -251,6 +264,11 @@ rendered caret back past the marks, in UTF-16 units and across an emoji.
 string spanning lines; SQL keywords in any case; a stray quote stopping at its line; tokens never overlapping
 or splitting a character. The block renderer is covered for a known-language fence being coloured, an unknown
 one staying plain, and `<script>` inside a fence still being escaped.
+
+The sidebar and the settings have their own file too: a page starred and unstarred, favourites listed
+by name with journals excluded, recents ordered newest-first and a re-opened page moving back to the top,
+the cap, a journal day never counted as a recent page, a setting written and read back, and the check
+that starring and visiting leave undo untouched.
 
 `search` has its own file: page ranking (exact, prefix, anywhere, capped, journals excluded), a half-typed
 word already matching block text, a block hit naming the page it lives on, an empty answer for a query that

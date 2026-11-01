@@ -8,9 +8,12 @@ ApplicationWindow {
     objectName: "mainWindow"
     width: 820
     height: 900
-    visible: true
+    // Faded in once the store has answered, because the theme lives there: appearing light and then
+    // turning dark is worse than a few milliseconds of nothing. It stays `visible` rather than being
+    // hidden, so the compositor keeps the geometry it gave the window at creation.
+    opacity: root.revealed ? 1 : 0
     title: qsTr("LogNotes")
-    color: "#faf9f7"
+    color: theme.page
 
     // Where the caret should land once the model has been rebuilt. Every save returns a fresh
     // snapshot and resets the model, so the delegate that had focus is gone by the time the rows
@@ -29,6 +32,31 @@ ApplicationWindow {
     // window closes: the process exits before the timer fires.
     property var unsaved: ({})
 
+    // Every colour in the window, in one place and keyed by theme: a third theme would be another table
+    // of these roles, not a sweep through the file.
+    QtObject {
+        id: theme
+        readonly property color page: root.darkTheme ? "#17181a" : "#faf9f7"
+        readonly property color panel: root.darkTheme ? "#1f2124" : "#f2efe9"
+        readonly property color rule: root.darkTheme ? "#2c2f33" : "#ece7de"
+        readonly property color border: root.darkTheme ? "#34383d" : "#ddd8ce"
+        readonly property color text: root.darkTheme ? "#e6e3dc" : "#242424"
+        readonly property color textMuted: root.darkTheme ? "#b8b2a6" : "#5b5b5b"
+        readonly property color textFaint: root.darkTheme ? "#a39c90" : "#8a857c"
+        readonly property color textGhost: root.darkTheme ? "#8f8a80" : "#a39c90"
+        readonly property color hover: root.darkTheme ? "#26292d" : "#ece7de"
+        readonly property color accent: root.darkTheme ? "#8fb6e8" : "#3a6ea5"
+        readonly property color danger: root.darkTheme ? "#e0948a" : "#a4443c"
+        readonly property color dangerText: root.darkTheme ? "#e8b0a8" : "#7a3a3a"
+        readonly property color success: root.darkTheme ? "#8fc79c" : "#4a7c59"
+        readonly property color warning: root.darkTheme ? "#d8b076" : "#b07d3a"
+        readonly property color markerIdle: root.darkTheme ? "#3a3f45" : "#e4e0d8"
+        readonly property color scrim: root.darkTheme ? "#000000" : "#3c3223"
+        readonly property color onMarker: "#ffffff"
+    }
+    // The theme the store remembered, or light until it says otherwise.
+    property bool darkTheme: journal.theme === "dark"
+
     // The quick switcher: one field over the whole graph. `searchHits` is rebuilt from the model's JSON
     // answer, and `searchMessage` is empty unless there is something to say.
     property int searchSelected: -1
@@ -45,16 +73,29 @@ ApplicationWindow {
     property bool unlinkedExpanded: false
     // Switching views replaces every row, so the caret has to be placed somewhere afterwards.
     property bool pendingViewFocus: false
-    property var pageList: []
+    property bool sidebarOpen: true
+    property var sidebarFavourites: []
+    property var sidebarRecent: []
+    // The window waits for the store, because the theme lives there and appearing light and then
+    // turning dark is worse than appearing a few milliseconds later.
+    property bool revealed: false
 
-    function refreshPages() {
-        try {
-            root.pageList = JSON.parse(journal.page_names())
-        } catch (error) {
-            root.pageList = []
-        }
+    // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
+    function openPage(name) {
+        root.unlinkedExpanded = false
+        root.focusRow = -1
+        root.pendingViewFocus = true
+        root.rebuilding = true
+        journal.open_page(name)
     }
 
+    function goJournal() {
+        root.unlinkedExpanded = false
+        root.focusRow = -1
+        root.pendingViewFocus = true
+        root.rebuilding = true
+        journal.show_journal()
+    }
     function flushUnsaved() {
         for (const row in root.unsaved) {
             journal.save_now(Number(row), root.unsaved[row])
@@ -72,17 +113,24 @@ ApplicationWindow {
     component QuietButton: Button {
         id: control
         background: Rectangle {
-            color: control.hovered ? "#ece7de" : "transparent"
-            border.color: "#d9d3c8"
+            color: control.hovered ? theme.hover : "transparent"
+            border.color: theme.border
             radius: 6
         }
         contentItem: Label {
             text: control.text
-            color: "#242424"
+            color: theme.text
             font.pixelSize: 13
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
+    }
+
+    // If the store never answers, show the window anyway rather than leave nothing on screen.
+    Timer {
+        interval: 2000
+        running: !root.revealed
+        onTriggered: root.revealed = true
     }
 
     Journal {
@@ -98,9 +146,23 @@ ApplicationWindow {
         target: journal
 
         function onReadyChanged() {
+            if (journal.ready || journal.error !== "") {
+                root.revealed = true
+            }
             if (journal.ready && root.focusRow < 0) {
                 root.beginEdit(root.firstBlockRow(), 0)
             }
+        }
+
+        function onSidebarChanged() {
+            let body = { favourites: [], recent: [] }
+            try {
+                body = JSON.parse(journal.sidebar)
+            } catch (error) {
+                body = { favourites: [], recent: [] }
+            }
+            root.sidebarFavourites = body.favourites || []
+            root.sidebarRecent = body.recent || []
         }
 
         function onHitsChanged() {
@@ -131,7 +193,7 @@ ApplicationWindow {
 
         function onRevisionChanged() {
             root.rebuilding = false
-            root.refreshPages()
+
             // A search hit asked for the caret to be put in a block: this snapshot has the row, so put
             // the caret on the match rather than at the start of the block.
             if (journal.focus_row >= 0) {
@@ -242,10 +304,10 @@ ApplicationWindow {
     }
 
     function markerColour(marker) {
-        if (marker === "TODO") return "#b07d3a"
-        if (marker === "DOING") return "#3a6ea5"
-        if (marker === "DONE") return "#4a7c59"
-        return "#e4e0d8"
+        if (marker === "TODO") return theme.warning
+        if (marker === "DOING") return theme.accent
+        if (marker === "DONE") return theme.success
+        return theme.markerIdle
     }
 
     function formatDay(iso) {
@@ -261,16 +323,21 @@ ApplicationWindow {
     // Ctrl+K over anything: page names first, then blocks whose text matches.
     Shortcut {
         sequences: ["Ctrl+K"]
-        onActivated: root.openSearch()
+        onActivated: root.focusSearch()
     }
 
-    function openSearch() {
-        searchField.text = ""
-        searchModel.clear()
-        root.searchSelected = -1
-        root.searchMessage = ""
-        searchPopup.open()
+    Shortcut {
+        sequences: ["Ctrl+B"]
+        onActivated: root.sidebarOpen = !root.sidebarOpen
+    }
+
+    // Typing in the bar is what opens the results; Ctrl+K only puts the caret there.
+    function focusSearch() {
         searchField.forceActiveFocus()
+        searchField.selectAll()
+        if (searchField.text !== "") {
+            searchPopup.open()
+        }
     }
 
     function searchMove(step) {
@@ -307,18 +374,21 @@ ApplicationWindow {
     Timer {
         id: searchDebounce
         interval: 120
-        onTriggered: journal.search(searchField.text)
+        onTriggered: {
+            journal.search(searchField.text)
+            if (searchField.text.trim() !== "") {
+                searchPopup.open()
+            } else {
+                searchPopup.close()
+            }
+        }
     }
 
     // One place decides what following a link means: a page link opens that page, anything else leaves
     // the app. Page links and tags share the `page:` scheme, so they behave the same everywhere.
     function openLink(href) {
         if (href.indexOf("page:") === 0) {
-            root.unlinkedExpanded = false
-            root.focusRow = -1
-            root.pendingViewFocus = true
-            root.rebuilding = true
-            journal.open_page(href.substring("page:".length))
+            root.openPage(href.substring("page:".length))
         } else if (href !== "") {
             Qt.openUrlExternally(href)
         }
@@ -339,8 +409,8 @@ ApplicationWindow {
         padding: 12
 
         background: Rectangle {
-            color: "#faf9f7"
-            border.color: "#ddd8ce"
+            color: theme.page
+            border.color: theme.border
             radius: 8
         }
 
@@ -407,7 +477,7 @@ ApplicationWindow {
                     width: 150
                     horizontalAlignment: Text.AlignHCenter
                     anchors.verticalCenter: parent.verticalCenter
-                    color: "#242424"
+                    color: theme.text
                 }
 
                 QuietButton {
@@ -429,7 +499,7 @@ ApplicationWindow {
 
             Label {
                 text: qsTr("Picked: %1").arg(Qt.formatDate(datePopup.picked, "ddd, MMM d"))
-                color: "#5b5b5b"
+                color: theme.textMuted
                 font.pixelSize: 12
             }
 
@@ -464,115 +534,254 @@ ApplicationWindow {
 
     }
 
-    // A slim bar: what you are looking at, and the way to something else.
+    // ---- the shell: a bar across the top, the sidebar under it -------------------------------
     Rectangle {
         id: topBar
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 40
-        color: "#f2efe9"
+        height: 48
+        color: theme.panel
+
+        Rectangle {
+            anchors.bottom: parent.bottom
+            width: parent.width
+            height: 1
+            color: theme.rule
+        }
+
+        Label {
+            id: brand
+            anchors.left: parent.left
+            anchors.leftMargin: 20
+            anchors.verticalCenter: parent.verticalCenter
+            text: qsTr("LogNotes")
+            color: theme.text
+            font.pixelSize: 14
+            font.bold: true
+        }
 
         Row {
-            anchors.left: parent.left
-            anchors.leftMargin: 28
+            id: barButtons
+            anchors.right: parent.right
+            anchors.rightMargin: 14
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 10
+            spacing: 6
 
             QuietButton {
-                objectName: "pagesButton"
-                text: qsTr("Pages")
-                onClicked: pagesPopup.open()
+                objectName: "journalButton"
+                text: qsTr("Journal")
+                onClicked: root.goJournal()
+            }
+
+            QuietButton {
+                objectName: "sidebarButton"
+                text: root.sidebarOpen ? qsTr("\u2039") : qsTr("\u203a")
+                onClicked: root.sidebarOpen = !root.sidebarOpen
+            }
+
+            QuietButton {
+                objectName: "themeButton"
+                text: root.darkTheme ? qsTr("\u2600") : qsTr("\u263e")
+                onClicked: journal.apply_theme(root.darkTheme ? "light" : "dark")
+            }
+        }
+
+        // The search field: typing in it opens the results just below.
+        Rectangle {
+            id: searchFieldBox
+            anchors.left: brand.right
+            anchors.leftMargin: 18
+            anchors.right: barButtons.left
+            anchors.rightMargin: 14
+            anchors.verticalCenter: parent.verticalCenter
+            height: 28
+            radius: 14
+            color: theme.page
+            border.color: searchField.activeFocus ? theme.accent : theme.border
+
+            TextInput {
+                id: searchField
+                objectName: "searchField"
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                verticalAlignment: TextInput.AlignVCenter
+                color: theme.text
+                font.pixelSize: 13
+                selectByMouse: true
+                onTextChanged: searchDebounce.restart()
+                onActiveFocusChanged: {
+                    if (!activeFocus) {
+                        searchPopup.close()
+                    }
+                }
+
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_Down) {
+                        root.searchMove(1)
+                        event.accepted = true
+                    } else if (event.key === Qt.Key_Up) {
+                        root.searchMove(-1)
+                        event.accepted = true
+                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        if (searchPopup.visible) {
+                            root.searchActivate(root.searchSelected)
+                            event.accepted = true
+                        }
+                    } else if (event.key === Qt.Key_Escape) {
+                        searchPopup.close()
+                        searchField.text = ""
+                        event.accepted = true
+                    }
+                }
+            }
+
+            // A plain TextInput has no placeholder, so the hint is its own label underneath it.
+            Label {
+                anchors.left: parent.left
+                anchors.leftMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                visible: searchField.text === ""
+                text: qsTr("Search pages and notes…")
+                color: theme.textGhost
+                font.pixelSize: 13
             }
         }
     }
 
-    Popup {
-        id: pagesPopup
-        parent: Overlay.overlay
-        x: 28
-        y: 44
-        width: 328
-        height: Math.min(400, 14 + (root.pageList.length + 1) * 30)
-        padding: 6
-        modal: false
-        focus: true
+    // The sidebar: favourites, then what was opened most recently.
+    Rectangle {
+        id: sidebar
+        objectName: "sidebar"
+        visible: root.sidebarOpen
+        anchors.top: topBar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        width: 184
+        color: theme.panel
 
-        background: Rectangle {
-            color: "#faf9f7"
-            border.color: "#ddd8ce"
-            radius: 8
+        Rectangle {
+            anchors.right: parent.right
+            width: 1
+            height: parent.height
+            color: theme.rule
         }
 
-        contentItem: Column {
-            spacing: 0
-            focus: true
+        Flickable {
+            anchors.fill: parent
+            anchors.margins: 10
+            contentHeight: sidebarColumn.height
+            clip: true
 
-            Rectangle {
-                objectName: "pageEntry"
-                width: pagesPopup.availableWidth
-                height: 30
-                radius: 5
-                property bool hovered: false
-                color: hovered ? "#ece7de" : "transparent"
+            Column {
+                id: sidebarColumn
+                width: parent.width
+                spacing: 2
 
                 Label {
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.left: parent.left
-                    anchors.leftMargin: 8
-                    text: qsTr("Journal")
-                    color: "#242424"
+                    visible: root.sidebarFavourites.length > 0
+                    text: qsTr("Favourites")
+                    color: theme.textGhost
+                    font.pixelSize: 10
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.6
+                    leftPadding: 6
+                    topPadding: 2
+                    bottomPadding: 2
                 }
 
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onEntered: parent.hovered = true
-                    onExited: parent.hovered = false
-                    onClicked: {
-                        root.unlinkedExpanded = false
-                        root.focusRow = -1
-                        root.pendingViewFocus = true
-                        root.rebuilding = true
-                        journal.show_journal()
-                        pagesPopup.close()
+                Repeater {
+                    model: root.sidebarFavourites
+
+                    delegate: Item {
+                        objectName: "sidebarRow"
+                        width: sidebarColumn.width
+                        height: 26
+                        property bool hovered: false
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 5
+                            color: parent.hovered ? theme.hover : "transparent"
+                        }
+
+                        Label {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "\u2605"
+                            color: theme.warning
+                            font.pixelSize: 10
+                        }
+
+                        Label {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 20
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData
+                            color: theme.text
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.hovered = true
+                            onExited: parent.hovered = false
+                            onClicked: root.openPage(modelData)
+                        }
                     }
                 }
-            }
 
-            Repeater {
-                model: root.pageList
+                Label {
+                    visible: root.sidebarRecent.length > 0
+                    text: qsTr("Recent")
+                    color: theme.textGhost
+                    font.pixelSize: 10
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.6
+                    leftPadding: 6
+                    topPadding: 12
+                    bottomPadding: 2
+                }
 
-                Rectangle {
-                    objectName: "pageEntry"
-                    width: pagesPopup.availableWidth
-                    height: 30
-                    radius: 5
-                    property bool hovered: false
-                    color: hovered ? "#ece7de" : "transparent"
+                Repeater {
+                    model: root.sidebarRecent
 
-                    Label {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: 8
-                        text: modelData
-                        color: "#242424"
-                        elide: Text.ElideRight
-                        width: parent.width - 24
-                    }
+                    delegate: Item {
+                        objectName: "sidebarRow"
+                        width: sidebarColumn.width
+                        height: 26
+                        property bool hovered: false
 
-                    MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onEntered: parent.hovered = true
-                        onExited: parent.hovered = false
-                        onClicked: {
-                            root.unlinkedExpanded = false
-                            root.focusRow = -1
-                            root.pendingViewFocus = true
-                            root.rebuilding = true
-                            journal.open_page(modelData)
-                            pagesPopup.close()
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 5
+                            color: parent.hovered ? theme.hover : "transparent"
+                        }
+
+                        Label {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 6
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData
+                            color: theme.text
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.hovered = true
+                            onExited: parent.hovered = false
+                            onClicked: root.openPage(modelData)
                         }
                     }
                 }
@@ -584,82 +793,24 @@ ApplicationWindow {
         id: searchPopup
         objectName: "searchPopup"
         parent: Overlay.overlay
-        // A Popup is not an Item: it has x/y, not anchors, so it is centred by arithmetic.
-        x: Math.round((root.width - width) / 2)
-        y: 64
-        width: Math.min(560, root.width - 80)
+        // Hangs under the field it answers. Not modal and never focused: the field keeps the caret,
+        // and Esc, Enter and the arrows are handled there.
+        x: searchFieldBox.mapToItem(Overlay.overlay, 0, 0).x
+        y: topBar.height + 6
+        width: searchFieldBox.width
         padding: 0
-        modal: true
-        focus: true
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-        Overlay.modal: Rectangle {
-            color: "#3c3223"
-            opacity: 0.08
-        }
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
 
         background: Rectangle {
-            color: "#faf9f7"
-            border.color: "#ddd8ce"
+            color: theme.page
+            border.color: theme.border
             radius: 10
         }
 
         contentItem: Column {
             spacing: 0
-
-            Item {
-                width: parent.width
-                height: 46
-
-                TextInput {
-                    id: searchField
-                    objectName: "searchField"
-                    anchors.fill: parent
-                    anchors.leftMargin: 14
-                    anchors.rightMargin: 14
-                    verticalAlignment: TextInput.AlignVCenter
-                    color: "#242424"
-                    font.pixelSize: 15
-                    selectByMouse: true
-                    // No `focus: true`: an item inside a closed popup still takes the window's focus at
-                    // startup and leaves the column with none. The overlay focuses it when it opens.
-                    onTextChanged: searchDebounce.restart()
-
-                    Keys.onPressed: (event) => {
-                        if (event.key === Qt.Key_Down) {
-                            root.searchMove(1)
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Up) {
-                            root.searchMove(-1)
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                            root.searchActivate(root.searchSelected)
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Escape) {
-                            searchPopup.close()
-                            event.accepted = true
-                        }
-                    }
-                }
-
-                // A plain TextInput has no placeholder, so the hint is its own label underneath it.
-                Label {
-                    anchors.left: parent.left
-                    anchors.leftMargin: 14
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: searchField.text === ""
-                    text: qsTr("Search pages and notes…")
-                    color: "#a39c90"
-                    font.pixelSize: 15
-                }
-
-                Rectangle {
-                    anchors.bottom: parent.bottom
-                    width: parent.width
-                    height: 1
-                    color: "#ece7de"
-                }
-            }
 
             ListView {
                 id: searchList
@@ -692,7 +843,7 @@ ApplicationWindow {
                         height: 20
                         verticalAlignment: Text.AlignBottom
                         text: model.kind === "page" ? qsTr("Pages") : qsTr("Blocks")
-                        color: "#8a857c"
+                        color: theme.textFaint
                         font.pixelSize: 10
                         font.capitalization: Font.AllUppercase
                         font.letterSpacing: 0.4
@@ -703,7 +854,7 @@ ApplicationWindow {
                         anchors.top: parent.labelsGroup ? groupLabel.bottom : parent.top
                         width: parent.width
                         height: 30
-                        color: index === root.searchSelected ? "#ece7de" : "transparent"
+                        color: index === root.searchSelected ? theme.hover : "transparent"
 
                         Label {
                             anchors.verticalCenter: parent.verticalCenter
@@ -714,7 +865,7 @@ ApplicationWindow {
                             // A block hit is already rendered from the scan; a page name is a plain name.
                             text: model.title
                             textFormat: model.kind === "block" ? Text.RichText : Text.PlainText
-                            color: "#242424"
+                            color: theme.text
                             font.pixelSize: 14
                             elide: Text.ElideRight
                         }
@@ -725,7 +876,7 @@ ApplicationWindow {
                             anchors.right: parent.right
                             anchors.rightMargin: 14
                             text: model.kind === "page" ? qsTr("page") : root.searchWhere(model)
-                            color: "#8a857c"
+                            color: theme.textFaint
                             font.pixelSize: 12
                         }
 
@@ -746,7 +897,7 @@ ApplicationWindow {
                 topPadding: 10
                 bottomPadding: 12
                 text: root.searchMessage
-                color: "#7a3a3a"
+                color: theme.dangerText
                 font.pixelSize: 13
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
             }
@@ -758,7 +909,7 @@ ApplicationWindow {
                 topPadding: 8
                 bottomPadding: 10
                 text: qsTr("↑↓ to move · Enter to open · Esc to close")
-                color: "#a39c90"
+                color: theme.textGhost
                 font.pixelSize: 11
             }
         }
@@ -767,12 +918,17 @@ ApplicationWindow {
     ListView {
         id: list
         objectName: "column"
-        anchors.fill: parent
+        anchors.top: topBar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: root.sidebarOpen ? sidebar.right : parent.left
+        anchors.right: parent.right
         anchors.margins: 28
-        anchors.topMargin: 56
         model: journal
         spacing: 3
         clip: true
+        // No off-screen delegate cache: every save rebuilds the model, and a cached delegate from before
+        // the rebuild lingers in the tree — invisible on screen, visible to anything that walks it.
+        cacheBuffer: 0
         boundsBehavior: Flickable.StopAtBounds
         visible: journal.ready && journal.error === ""
 
@@ -825,7 +981,7 @@ ApplicationWindow {
                 text: kind === "heading"
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
                       : model.text
-                color: kind === "page-header" ? "#242424" : "#5b5b5b"
+                color: kind === "page-header" ? theme.text : theme.textMuted
                 font.pixelSize: kind === "heading" ? 15 : (kind === "page-header" ? 22 : 13)
                 font.bold: true
                 font.capitalization: (kind === "heading" || kind === "page-header")
@@ -836,6 +992,31 @@ ApplicationWindow {
                     anchors.fill: parent
                     enabled: kind === "unlinked-header"
                     onClicked: root.unlinkedExpanded = !root.unlinkedExpanded
+                }
+            }
+
+            // A page is starred from its own header: the place you are looking at when you decide. An
+            // item of its own, so the target is a comfortable square rather than the glyph.
+            Item {
+                id: favouriteStar
+                objectName: "favouriteStar"
+                visible: kind === "page-header"
+                width: 32
+                height: 32
+                anchors.right: parent.right
+                anchors.bottom: sectionHeading.bottom
+                anchors.bottomMargin: -6
+
+                Label {
+                    anchors.centerIn: parent
+                    text: journal.page_favourite ? "\u2605" : "\u2606"
+                    color: journal.page_favourite ? theme.warning : theme.textGhost
+                    font.pixelSize: 18
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: journal.toggle_favourite(model.text, !journal.page_favourite)
                 }
             }
 
@@ -873,7 +1054,7 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         visible: model.marker === "DONE"
                         text: "\u2713"
-                        color: "#ffffff"
+                        color: theme.page
                         font.pixelSize: 10
                         font.bold: true
                     }
@@ -908,7 +1089,7 @@ ApplicationWindow {
                     id: scheduledChip
                     visible: !rowItem.isAgenda && model.scheduled !== ""
                     text: formatDay(model.scheduled)
-                    color: model.overdue ? "#a4443c" : "#8a857c"
+                    color: model.overdue ? theme.danger : theme.textFaint
                     font.pixelSize: 12
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
@@ -924,7 +1105,7 @@ ApplicationWindow {
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.text
-                    color: model.marker === "DONE" ? "#8a857c" : "#242424"
+                    color: model.marker === "DONE" ? theme.textFaint : theme.text
                     font.pixelSize: 16
                     font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
@@ -1017,11 +1198,16 @@ ApplicationWindow {
                                 }
                             }
                             event.accepted = true
+                        } else if (event.key === Qt.Key_B
+                                   && (event.modifiers & Qt.ControlModifier)) {
+                            // TextEdit binds Ctrl+B to bold and would eat the key. Claim it here.
+                            root.sidebarOpen = !root.sidebarOpen
+                            event.accepted = true
                         } else if (event.key === Qt.Key_K
                                    && (event.modifiers & Qt.ControlModifier)) {
                             // TextEdit binds Ctrl+K to "delete to end of line" and would eat the key —
-                            // deleting your text instead of opening the switcher. Claim it here.
-                            root.openSearch()
+                            // deleting your text instead of searching. Claim it here.
+                            root.focusSearch()
                             event.accepted = true
                         } else if (event.key === Qt.Key_S
                                    && (event.modifiers & Qt.ControlModifier)
@@ -1090,7 +1276,7 @@ ApplicationWindow {
                     anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
-                    color: model.marker === "DONE" ? "#8a857c" : "#242424"
+                    color: model.marker === "DONE" ? theme.textFaint : theme.text
                     font.pixelSize: 16
                     font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
@@ -1130,7 +1316,7 @@ ApplicationWindow {
                     text: model.html === "" ? qsTr("(empty block)") : model.html
                     textFormat: Text.RichText
                     onLinkActivated: (link) => root.openLink(link)
-                    color: model.overdue ? "#a4443c" : "#242424"
+                    color: model.overdue ? theme.danger : theme.text
                     font.pixelSize: 16
                     elide: Text.ElideRight
                 }
@@ -1155,7 +1341,7 @@ ApplicationWindow {
                         }
                         return day + " · from " + (isDate ? formatDay(model.source) : model.source)
                     }
-                    color: model.overdue ? "#a4443c" : "#8a857c"
+                    color: model.overdue ? theme.danger : theme.textFaint
                     font.pixelSize: 12
                 }
             }
@@ -1192,7 +1378,7 @@ ApplicationWindow {
                     objectName: "diagramError"
                     visible: model.diagramError !== ""
                     text: model.diagramError
-                    color: "#a4443c"
+                    color: theme.danger
                     font.pixelSize: 12
                     width: parent.width
                     wrapMode: Text.WrapAtWordBoundaryOrAnywhere
@@ -1204,7 +1390,7 @@ ApplicationWindow {
     Rectangle {
         id: errorPane
         anchors.fill: parent
-        color: "#faf9f7"
+        color: theme.page
         visible: !journal.ready && journal.error !== ""
 
         Column {
@@ -1214,7 +1400,7 @@ ApplicationWindow {
 
             Label {
                 text: qsTr("LogNotes could not open its database.")
-                color: "#242424"
+                color: theme.text
                 font.pixelSize: 18
                 font.bold: true
             }
@@ -1223,14 +1409,14 @@ ApplicationWindow {
                 width: parent.width
                 text: journal.error
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                color: "#7a3a3a"
+                color: theme.dangerText
             }
 
             Label {
                 width: parent.width
                 text: qsTr("Your notes are still on disk; LogNotes just cannot open them right now.")
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                color: "#5b5b5b"
+                color: theme.textMuted
             }
 
             Row {
@@ -1255,6 +1441,6 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.margins: 12
         text: journal.error
-        color: "#7a3a3a"
+        color: theme.dangerText
     }
 }

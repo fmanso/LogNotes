@@ -68,6 +68,10 @@ The rejected alternatives are what make this the decision it is — a rich-text 
 styled copy of the text, would each give the app two truths about a block that can drift apart, and put
 the caret and the saved text at the mercy of a renderer.
 
+**The app's own settings live in the database.** A `setting` table holds the theme beside the notes, so there
+is still one file to back up and nothing to keep in step. The cost is that the theme is unknown until the
+store answers, so the window fades in on the first snapshot rather than appearing light and turning dark.
+
 **Code is lexed, not parsed, and coloured by the view's palette.** A fence's language picks one of six
 families in core's `code` module, and a lexer — not a parser — turns its body into keyword, string, comment
 and number runs. That is why it never fails on odd input: an unterminated string stops at the end of its

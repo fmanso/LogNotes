@@ -53,6 +53,8 @@ application small enough to fully own and trim.
   listed is inferred from "if marked as DONE it should disappear" — unconfirmed.)*
 - **A link goes where it points.** A click on `[[page]]` or `#tag` in a block opens that page, creating it if
   nothing has written it yet, so the click always lands somewhere you can type.
+- **A shell you can work from.** A bar with a search field, a way back to the journal, and a light/dark theme
+  switch that is remembered; a sidebar of the pages you starred and the ones you opened most recently.
 - **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names first, then blocks whose
   text matches, as you type. `Enter` opens the page, or puts the caret on the match in the block it found.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the

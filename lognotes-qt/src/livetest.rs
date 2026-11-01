@@ -125,10 +125,15 @@ pub fn run() -> ! {
 
     // Clicking a block puts the caret in it. Find the editor that shows the first block, click that,
     // and the text must land there — not in whichever block happened to hold the focus.
-    let first_block = (0..6)
-        .find(|index| driver::editor_text(*index).to_string() == "hello world")
-        .expect("the first block is on screen");
-    driver::click_block(first_block);
+    let seen: Vec<String> = (0..6).map(|index| driver::editor_text(index).to_string()).collect();
+    let first_block = (0..6).find(|index| seen[*index] == "hello world");
+    check(
+        "the first block is on screen",
+        first_block.is_some(),
+        format!("rows seen={seen:?}"),
+    );
+    let first_block = first_block.unwrap_or(0);
+    driver::click_block(first_block as i32);
     driver::wait_ms(400);
     // A click leaves the caret where it landed, so jump to the end before appending.
     driver::press_key(key::END, modifier::NONE);
@@ -228,17 +233,21 @@ pub fn run() -> ! {
     driver::wait_ms(800);
     shot("14-links-typed");
 
-    // The page switcher should now list the page the link created.
-    driver::click_named(&QString::from("pagesButton"), 0);
-    driver::wait_ms(400);
-    shot("15-page-switcher");
-    let entries = driver::click_named(&QString::from("pageEntry"), 1);
+    // The page the link created is reachable from the bar's search; the sidebar will list it once it
+    // has been opened.
+    driver::press_key(key::K, modifier::CTRL);
+    driver::wait_ms(300);
+    driver::type_text(&QString::from("My Project"));
+    driver::wait_ms(800);
+    shot("15-search-for-page");
+    driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(900);
     shot("16-page-view");
+    let page_rows = driver::row_count();
     check(
-        "the page created by the link can be opened",
-        entries,
-        "clicked the second switcher entry".to_string(),
+        "the page created by the link can be opened from search",
+        page_rows > 0 && page_rows < 20,
+        format!("rows={page_rows}"),
     );
 
     // Its reference panel: one linked reference, and the plain mention behind a collapsed group.
@@ -247,6 +256,64 @@ pub fn run() -> ! {
         "the page shows blocks and references",
         page_open > 2,
         format!("rows={page_open}"),
+    );
+
+    // ---- the sidebar and the theme ---------------------------------------------------------
+    // Opening the page put it in the sidebar's Recent list.
+    let sidebar = driver::journal_property(&QString::from("sidebar")).to_string();
+    check(
+        "the page just opened is listed as recent",
+        sidebar.contains("\"recent\":[\"My Project\"]"),
+        format!("sidebar={sidebar}"),
+    );
+
+    // The star in the page header stars it, which fills Favourites.
+    let starred = driver::click_named(&QString::from("favouriteStar"), 0);
+    driver::wait_ms(800);
+    shot("16a-starred");
+    let sidebar = driver::journal_property(&QString::from("sidebar")).to_string();
+    check(
+        "starring the page puts it in favourites",
+        starred
+            && driver::journal_property(&QString::from("page_favourite")).to_string() == "true"
+            && sidebar.contains("\"favourites\":[\"My Project\"]"),
+        format!(
+            "starred={starred} page_favourite={} sidebar={sidebar}",
+            driver::journal_property(&QString::from("page_favourite")).to_string()
+        ),
+    );
+
+    // Ctrl+B hides the sidebar and brings it back.
+    driver::press_key(key::B, modifier::CTRL);
+    driver::wait_ms(400);
+    check(
+        "ctrl+b hides the sidebar",
+        !driver::visible(&QString::from("sidebar")) && !driver::visible(&QString::from("sidebarRow")),
+        "sidebar rows are gone".to_string(),
+    );
+    driver::press_key(key::B, modifier::CTRL);
+    driver::wait_ms(400);
+    check(
+        "and shows it again",
+        driver::visible(&QString::from("sidebar")) && driver::visible(&QString::from("sidebarRow")),
+        "sidebar rows are back".to_string(),
+    );
+
+    // The theme button switches the whole window, and remembers it.
+    let toggled = driver::click_named(&QString::from("themeButton"), 0);
+    driver::wait_ms(700);
+    shot("16b-dark-theme");
+    check(
+        "the theme button switches to dark",
+        toggled && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!("theme={}", driver::journal_property(&QString::from("theme")).to_string()),
+    );
+    driver::click_named(&QString::from("themeButton"), 0);
+    driver::wait_ms(700);
+    check(
+        "and back to light",
+        driver::journal_property(&QString::from("theme")).to_string() == "light",
+        format!("theme={}", driver::journal_property(&QString::from("theme")).to_string()),
     );
 
     let expanded = driver::click_named(&QString::from("unlinkedToggle"), 0);
@@ -266,15 +333,10 @@ pub fn run() -> ! {
         format!("html={summary:?}"),
     );
 
-    // The popup closed when we picked a page, so reopen it before choosing Journal.
-    let switched_back = driver::click_named(&QString::from("pagesButton"), 0)
-        && {
-            driver::wait_ms(400);
-            driver::click_named(&QString::from("pageEntry"), 0)
-        };
+    let switched_back = driver::click_named(&QString::from("journalButton"), 0);
     driver::wait_ms(900);
     check(
-        "clicking Journal in the switcher returns to the column",
+        "the Journal button returns to the column",
         switched_back,
         "clicked Journal".to_string(),
     );
@@ -555,9 +617,7 @@ pub fn run() -> ! {
     );
 
     // Back to the journal for the close test.
-    driver::click_named(&QString::from("pagesButton"), 0);
-    driver::wait_ms(400);
-    driver::click_named(&QString::from("pageEntry"), 0);
+    driver::click_named(&QString::from("journalButton"), 0);
     driver::wait_ms(900);
 
     // Leave the caret where the close test expects it: at the end of the first block.

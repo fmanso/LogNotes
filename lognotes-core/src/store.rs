@@ -17,7 +17,7 @@ use crate::model::{
 use crate::order::key_between;
 use crate::text::{extract_links, mentions_whole_words};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE page (
@@ -74,6 +74,19 @@ CREATE TRIGGER block_fts_update AFTER UPDATE OF content ON block BEGIN
   INSERT INTO block_fts (rowid, content) VALUES (new.id, new.content);
 END;
 INSERT INTO block_fts (block_fts) VALUES ('rebuild');
+"#;
+
+/// Schema v3: a page can be starred and remembers when it was last opened, and the app keeps its own
+/// settings — the theme, today — in the same file as the notes, so there is nothing to keep in step.
+const SCHEMA_V3: &str = r#"
+ALTER TABLE page ADD COLUMN favourite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE page ADD COLUMN visit_order INTEGER;
+CREATE INDEX page_recent ON page (visit_order DESC) WHERE visit_order IS NOT NULL;
+CREATE INDEX page_favourite ON page (name_key) WHERE favourite = 1;
+CREATE TABLE setting (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 "#;
 
 /// One reversible mutation. `apply` performs an action and returns the action that undoes it, which is
@@ -516,6 +529,94 @@ impl Store {
         Ok(SearchResults { pages, blocks })
     }
 
+    /// Star or unstar a page. Outside the undo history: a note's text is what undo walks, and a star is
+    /// not an edit to the note.
+    pub fn set_favourite(&mut self, page_id: i64, favourite: bool) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE page SET favourite = ?2 WHERE id = ?1",
+                params![page_id, i64::from(favourite)],
+            )
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
+    /// Whether a page is starred.
+    pub fn is_favourite(&self, page_id: i64) -> Result<bool> {
+        let favourite: Option<i64> = self
+            .conn
+            .query_row("SELECT favourite FROM page WHERE id = ?1", [page_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(favourite.unwrap_or(0) != 0)
+    }
+
+    /// Record that a page was opened. Also outside the undo history: opening is not editing.
+    ///
+    /// The order is a counter, not a clock: two pages opened in the same second — the same millisecond, in
+    /// a test — still have a definite order, and a wall clock that jumps backwards cannot reshuffle the
+    /// sidebar.
+    pub fn record_visit(&mut self, page_id: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE page SET visit_order = (SELECT IFNULL(MAX(visit_order), 0) + 1 FROM page)
+                 WHERE id = ?1",
+                [page_id],
+            )
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
+    /// The starred pages, by name — the sidebar's Favourites.
+    pub fn pages_by_favourite(&self) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, name_key, kind, journal_date FROM page
+             WHERE kind = 'page' AND favourite = 1
+             ORDER BY name_key",
+        )?;
+        let pages = stmt
+            .query_map([], read_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pages)
+    }
+
+    /// Named pages opened most recently, newest first — the sidebar's Recent.
+    pub fn recent_pages(&self, limit: usize) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, name_key, kind, journal_date FROM page
+             WHERE kind = 'page' AND visit_order IS NOT NULL
+             ORDER BY visit_order DESC
+             LIMIT ?1",
+        )?;
+        let pages = stmt
+            .query_map([limit as i64], read_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pages)
+    }
+
+    /// A stored setting, or `None` when it was never written.
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM setting WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    }
+
+    /// Write a setting, replacing any previous value.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO setting (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
     /// The page a block belongs to — what the view needs to show a block a search found.
     pub fn page_of_block(&self, block_id: i64) -> Result<Page> {
         self.conn
@@ -806,6 +907,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if version < 2 {
         conn.execute_batch(SCHEMA_V2)?;
+    }
+    if version < 3 {
+        conn.execute_batch(SCHEMA_V3)?;
     }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())

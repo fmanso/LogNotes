@@ -20,6 +20,30 @@ pub struct Drawn {
     pub error: String,
 }
 
+/// The colours a diagram is drawn with. A theme is part of the cache key, so both variants can exist
+/// at once and switching theme redraws nothing that was already drawn.
+struct Ink {
+    background: &'static str,
+    text: &'static str,
+    line: &'static str,
+}
+
+fn ink(theme: &str) -> Ink {
+    if theme == "dark" {
+        Ink {
+            background: "#17181a",
+            text: "#e6e3dc",
+            line: "#a39c90",
+        }
+    } else {
+        Ink {
+            background: "#faf9f7",
+            text: "#242424",
+            line: "#8a857c",
+        }
+    }
+}
+
 /// Diagrams already drawn, by the hash of the code that produced them.
 #[derive(Default)]
 pub struct Diagrams {
@@ -28,13 +52,13 @@ pub struct Diagrams {
 
 impl Diagrams {
     /// The diagram for a block's text, or `None` when it has no mermaid fence.
-    pub fn for_text(&mut self, text: &str) -> Option<Drawn> {
+    pub fn for_text(&mut self, text: &str, theme: &str) -> Option<Drawn> {
         let fence = markdown::mermaid_fence(text)?;
-        let key = hash(&fence.code);
+        let key = hash(&format!("{theme}\u{1f}{}", fence.code));
         let drawn = self
             .drawn
             .entry(key)
-            .or_insert_with(|| render(&fence.code, key))
+            .or_insert_with(|| render(&fence.code, theme, key))
             .clone();
 
         Some(match drawn {
@@ -50,8 +74,18 @@ impl Diagrams {
     }
 }
 
-fn render(code: &str, key: u64) -> Result<String, String> {
-    let svg = mermaid_rs_renderer::render(code).map_err(|error| format!("diagram error: {}", first_line(&error.to_string())))?;
+fn render(code: &str, theme: &str, key: u64) -> Result<String, String> {
+    let ink = ink(theme);
+    let mut options = mermaid_rs_renderer::RenderOptions::modern();
+    // A diagram on a dark page: the card and its text follow the theme, or dark text would land on a
+    // dark background and the picture could not be read.
+    options.theme.background = ink.background.to_string();
+    options.theme.text_color = ink.text.to_string();
+    options.theme.primary_text_color = ink.text.to_string();
+    options.theme.line_color = ink.line.to_string();
+
+    let svg = mermaid_rs_renderer::render_with_options(code, options)
+        .map_err(|error| format!("diagram error: {}", first_line(&error.to_string())))?;
 
     let path = cache_dir().join(format!("{key:016x}.svg"));
     if let Some(parent) = path.parent() {
@@ -104,11 +138,11 @@ mod tests {
         let mut diagrams = Diagrams::default();
         let text = "```mermaid\ngraph TD\n  A --> B\n```";
 
-        let first = diagrams.for_text(text).expect("a mermaid fence");
+        let first = diagrams.for_text(text, "light").expect("a mermaid fence");
         assert!(first.error.is_empty(), "expected a diagram, got {}", first.error);
         assert!(first.source.starts_with("file://"), "got {}", first.source);
 
-        let again = diagrams.for_text(text).expect("a mermaid fence");
+        let again = diagrams.for_text(text, "light").expect("a mermaid fence");
         assert_eq!(again.source, first.source, "the same code draws the same file");
     }
 
@@ -116,7 +150,7 @@ mod tests {
     fn a_broken_diagram_reports_one_quiet_line() {
         let mut diagrams = Diagrams::default();
         let drawn = diagrams
-            .for_text("```mermaid\ngraph TD\n  A -->\n```")
+            .for_text("```mermaid\ngraph TD\n  A -->\n```", "light")
             .expect("a mermaid fence");
 
         assert!(drawn.source.is_empty());
@@ -129,7 +163,7 @@ mod tests {
         // The moment ```mermaid is typed the fence is a fence with nothing in it — the debounce will
         // render that, long before a person has typed a single line of diagram.
         let mut diagrams = Diagrams::default();
-        let drawn = diagrams.for_text("```mermaid").expect("a mermaid fence");
+        let drawn = diagrams.for_text("```mermaid", "light").expect("a mermaid fence");
 
         assert!(drawn.source.is_empty());
         assert!(drawn.error.starts_with("diagram error: "), "got {:?}", drawn.error);
@@ -139,8 +173,8 @@ mod tests {
     fn ordinary_code_is_not_a_diagram() {
         let mut diagrams = Diagrams::default();
 
-        assert!(diagrams.for_text("```rust\nfn main() {}\n```").is_none());
-        assert!(diagrams.for_text("just a note").is_none());
+        assert!(diagrams.for_text("```rust\nfn main() {}\n```", "light").is_none());
+        assert!(diagrams.for_text("just a note", "light").is_none());
     }
 
     #[test]
