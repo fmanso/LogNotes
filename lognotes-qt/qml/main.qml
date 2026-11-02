@@ -93,6 +93,7 @@ ApplicationWindow {
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
     function openPage(name) {
         root.closeSlash()
+        root.pendingTerm = ""
         searchField.focus = false
         root.emptyPulls = 0
         root.editingRow = -1
@@ -105,6 +106,7 @@ ApplicationWindow {
 
     function goJournal() {
         root.closeSlash()
+        root.pendingTerm = ""
         searchField.focus = false
         root.emptyPulls = 0
         root.editingRow = -1
@@ -238,9 +240,10 @@ ApplicationWindow {
                 const row = journal.focus_row
                 journal.clear_focus_row()
                 root.focusTerm = root.pendingTerm
-                root.pendingTerm = ""
                 root.beginEdit(row, 0)
             }
+            // A page hit has no row to put the caret in, so the term it carried must not linger.
+            root.pendingTerm = ""
             if (root.pendingViewFocus) {
                 root.pendingViewFocus = false
                 root.beginEdit(root.firstBlockRow(), 0)
@@ -642,6 +645,7 @@ ApplicationWindow {
     // "from Nov 1" goes to the block itself: its journal day, or the page it lives on, with the caret
     // in it — the same move a search hit makes.
     function openSource(blockId, source) {
+        root.pendingTerm = ""
         searchField.focus = false
         const isDate = /^\d{4}-\d{2}-\d{2}$/.test(source)
         root.rebuilding = true

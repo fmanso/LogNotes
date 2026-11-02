@@ -118,7 +118,12 @@ pub fn run() -> ! {
     check(
         "shift+tab outdented it",
         depths(&root) == [0, 0],
-        format!("depths={:?}", depths(&root)),
+        format!(
+            "depths={:?} focus={} rebuilding={}",
+            depths(&root),
+            driver::focus_name().to_string(),
+            driver::journal_property(&QString::from("ready")).to_string()
+        ),
     );
 
     driver::press_key(key::Z, modifier::CTRL);
@@ -376,7 +381,10 @@ pub fn run() -> ! {
     driver::settle();
     shot("18-markdown-typed");
 
-    let typed = driver::editor_text(0).to_string();
+    // Which row is at which index is the view's business, and it moves as rows come and go; every step
+    // below finds its block by what is in it.
+    let marked = row_with("**bold**");
+    let typed = driver::editor_text(marked).to_string();
     check(
         "the editor shows plain text, marks and all",
         typed.contains("**bold**") && typed.contains("`code`"),
@@ -384,13 +392,13 @@ pub fn run() -> ! {
     );
 
     // ---- a block at rest renders its markdown ----------------------------------------------
-    // Moving the caret to another block leaves this one showing its finished text.
-    // Aimed at the left of the row: its text contains a link, and clicking that would navigate.
-    driver::click_block_at(1, 0.12);
+    // Focus another row so this one renders, then read *this* row's HTML.
+    let elsewhere = if marked == 0 { 1 } else { 0 };
+    driver::click_block(elsewhere);
     driver::settle();
     shot("19-block-at-rest");
-    wait_until(|| !driver::rendered_html().to_string().is_empty());
-    let shown = driver::rendered_html().to_string();
+    wait_until(|| !driver::row_html(marked).to_string().is_empty());
+    let shown = driver::row_html(marked).to_string();
     check(
         "a block that is not being edited shows the finished text",
         shown.contains("font-weight:700")
@@ -401,13 +409,13 @@ pub fn run() -> ! {
     );
 
     // And clicking it edits it again, at the caret the click landed on, marks intact.
-    let raw_before = driver::editor_text(0).to_string();
-    driver::click_block(0);
+    let raw_before = driver::editor_text(marked).to_string();
+    driver::click_block_at(marked, 0.95);
     driver::wait_ms(300);
     driver::type_text(&QString::from("~"));
     driver::settle();
     shot("20-click-to-edit");
-    let raw_after = driver::editor_text(0).to_string();
+    let raw_after = driver::editor_text(marked).to_string();
     check(
         "clicking a rendered block edits it again with its marks intact",
         raw_after.chars().count() == raw_before.chars().count() + 1 && raw_after.contains("**bold**"),
@@ -415,14 +423,13 @@ pub fn run() -> ! {
     );
 
     // Typing the instant a rendered block is clicked: a person does not wait for the next frame, so the
-    // keystrokes have to land rather than go nowhere.
-    let before_instant = driver::editor_text(1).to_string();
-    // Past the end of the text, so the caret lands at the end and away from the row's link; the next step
-    // splits there and expects an empty tail.
-    driver::click_block_at(1, 0.95);
+    // keystrokes have to land rather than go nowhere. Aimed past the text, away from the row's link.
+    let linked = row_with("second");
+    let before_instant = driver::editor_text(linked).to_string();
+    driver::click_block_at(linked, 0.95);
     driver::type_text(&QString::from("xyz"));
     driver::settle();
-    let after_instant = driver::editor_text(1).to_string();
+    let after_instant = driver::editor_text(linked).to_string();
     check(
         "typing straight after clicking a rendered block is not lost",
         after_instant.contains("xyz") && after_instant.len() == before_instant.len() + 3,
@@ -435,22 +442,17 @@ pub fn run() -> ! {
     driver::wait_ms(60);
     driver::type_text(&QString::from("qp"));
     driver::settle();
+    let landed = (0..10).find(|index| driver::editor_text(*index).to_string() == "qp");
     check(
         "typing straight after Enter is not lost",
-        driver::editor_text(2).to_string() == "qp",
-        format!(
-            "row2={:?} row1={:?} row0={:?} focus={}",
-            driver::editor_text(2).to_string(),
-            driver::editor_text(1).to_string(),
-            driver::editor_text(0).to_string(),
-            driver::focus_name().to_string()
-        ),
+        landed.is_some(),
+        format!("rows={:?}", (0..4).map(|i| driver::editor_text(i).to_string()).collect::<Vec<_>>()),
     );
 
     // ---- starting a code block by typing ``` -----------------------------------------------
     // A new block, then the three backticks typed quickly — each keystroke landing inside the debounce
-    // window, which is what a person does. Aimed left of the row's link.
-    driver::click_block_at(1, 0.12);
+    // window, which is what a person does.
+    driver::click_block_at(linked, 0.98);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
@@ -462,7 +464,8 @@ pub fn run() -> ! {
     }
     driver::settle();
     shot("21-typing-backticks");
-    let started = driver::editor_text(2).to_string();
+    let backticks = row_with("```");
+    let started = driver::editor_text(backticks).to_string();
     check(
         "typing ``` in a new block keeps the caret in it",
         driver::focus_name().to_string() == "blockEditor" && started == "```",
@@ -473,8 +476,9 @@ pub fn run() -> ! {
     );
 
     // ---- a fence that spans lines, and the diagram it draws ---------------------------------
+    let first = row_with("hello world");
     let blocks_before_fence = blocks(&root).len();
-    driver::click_block(0);
+    driver::click_block(first);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
@@ -498,8 +502,9 @@ pub fn run() -> ! {
     let fenced = blocks(&root);
     check(
         "enter inside a fence kept the whole of it in one block",
-        blocks_before_fence == fenced.len() && fenced[0].contains("```mermaid") && fenced[0].contains('\n'),
-        format!("blocks={} fence={:?}", fenced.len(), fenced[0]),
+        blocks_before_fence == fenced.len()
+            && fenced.iter().any(|block| block.contains("```mermaid") && block.contains('\n')),
+        format!("blocks={:?}", fenced),
     );
     let diagram = driver::named_text(&QString::from("diagram"), 0).to_string();
     let drawn = diagram
@@ -513,9 +518,9 @@ pub fn run() -> ! {
     );
 
     // ---- a fence that does not parse -------------------------------------------------------
-    // Appended to the second block rather than split into a third: a split needs the caret and the row
-    // to agree, and this check is about the message, not about splitting. Aimed left of the row's link.
-    driver::click_block_at(1, 0.12);
+    // Appended to the block that holds the link rather than split into a third: this check is about the
+    // message, not about splitting. Aimed left of the row's link.
+    driver::click_block_at(linked, 0.98);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
@@ -536,8 +541,9 @@ pub fn run() -> ! {
     );
 
     // ---- a python fence is coloured ---------------------------------------------------------
-    // The last block is free: give it a fence whose language is known, then read what it renders.
-    driver::click_block(3);
+    // A free block gets a fence whose language is known, then what it renders is read back.
+    let free = row_with("qp");
+    driver::click_block(free);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
@@ -556,10 +562,12 @@ pub fn run() -> ! {
     driver::settle();
 
     // Leave the block so it renders, then read its HTML.
-    driver::click_block(0);
+    let python = row_with("```python");
+    driver::click_block(first);
     driver::settle();
     shot("24-python-fence");
-    let code_html = driver::row_html(3).to_string();
+    wait_until(|| !driver::row_html(python).to_string().is_empty());
+    let code_html = driver::row_html(python).to_string();
     check(
         "a python fence renders its keywords and numbers coloured",
         code_html.contains("def") && code_html.contains("#3a6ea5") && code_html.contains("#a4443c"),
@@ -641,7 +649,11 @@ pub fn run() -> ! {
     check(
         "the page a link opened takes a keystroke",
         on_page.iter().any(|block| block.contains('R')),
-        format!("page blocks={on_page:?}"),
+        format!(
+            "page blocks={on_page:?} journal={:?} focus={}",
+            blocks(&root),
+            driver::focus_name().to_string()
+        ),
     );
 
     // ---- slash commands at block level --------------------------------------------------------
@@ -844,6 +856,14 @@ fn rows(root: &std::path::Path) -> Vec<BlockRow> {
 
 fn blocks(root: &std::path::Path) -> Vec<String> {
     rows(root).into_iter().map(|block| block.content).collect()
+}
+
+/// The row whose editor holds `needle`, found by content: a row's index moves as rows come and go, and a
+/// rendered row still reports its raw text.
+fn row_with(needle: &str) -> i32 {
+    (0..12)
+        .find(|index| driver::editor_text(*index).to_string().contains(needle))
+        .unwrap_or(0)
 }
 
 /// Waits until `settled` holds, giving up after a few seconds. Every save rebuilds the model, so a read

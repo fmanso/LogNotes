@@ -235,6 +235,10 @@ with the command's effect and never types markdown into the block, and each comm
   button, a sidebar toggle and the theme toggle; typing in the field opens the results just under it, and
   `Ctrl+K` only puts the caret there. The sidebar lists Favourites then Recent (eight), and the Pages
   popup is gone — one way to reach a page, not two. A page is starred from the star in its own header.
+- **A search term belongs to the hit that carried it.** It is captured when a hit is activated and
+  consumed by the block that hit names; every other navigation forgets it. Left behind, it moved the
+  caret to where that word happened to sit in a *later* block — which is how a reference click put the
+  caret inside a link and renamed the page it pointed at.
 - **Focus leaves a block only when something else takes it.** The blur that follows a rebuild cannot say
   whether the caret is gone or merely being handed back, so `rebuilding` stays up until the next turn
   (`Qt.callLater`) and the delegate that was destroyed reports its blur while the flag is still set.
@@ -327,6 +331,18 @@ window rather than trust a passing assertion.
 The slash-command steps assume no row on purpose: a synthetic click lands unreliably under this compositor
 (a dozen earlier steps already fail that way on the base commit), so each one reads the store once and finds
 its block by content — "the block that holds today's link" — rather than by an index it cannot trust.
+
+Three habits keep the run honest, after a stretch of steps that passed on one run and failed on the next:
+
+- **`settle()` instead of sleeping.** It waits for the store to answer, then outlasts the 250 ms debounce,
+  then waits for the model to stop changing. A fixed sleep either read mid-rebuild — when the delegates
+  have been destroyed and not rebuilt — or was too short for the store to open at launch.
+- **Find a row by its content, never by its index.** `row_with("**bold**")` looks for the block; which row
+  sits at which index is the view's business and moves as rows come and go. A rendered row still reports
+  its raw text, so this works whether the block is being edited or not.
+- **Aim a click that is only meant to move the caret.** `click_block_at(row, fraction)` exists because a
+  click at 12% of a row still landed inside a `[[link]]` and navigated — the feature working as designed,
+  on a test that did not mean it.
 
 Two harness lessons that cost a run each. `grabWindow()` races Qt's threaded render loop and can take the
 whole process down inside `QRhi::beginFrame`; run the harness with `QSG_RENDER_LOOP=basic`. And Qt Quick
