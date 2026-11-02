@@ -23,6 +23,7 @@ pub fn run() -> ! {
     let attached = match engine.as_mut() {
         Some(mut engine) => {
             engine.as_mut().load(&QUrl::from(MAIN_QML));
+            // Not `settle()`: it reads the model through the attached root, and there is none yet.
             driver::wait_ms(900);
             driver::attach(&engine)
         }
@@ -71,7 +72,7 @@ pub fn run() -> ! {
     );
 
     driver::type_text(&QString::from("hello world"));
-    driver::wait_ms(700);
+    driver::settle();
     shot("02-typed");
     check(
         "typing reached the store",
@@ -80,7 +81,7 @@ pub fn run() -> ! {
     );
 
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(700);
+    driver::settle();
     shot("03-enter");
     check(
         "enter split the block and left an empty one",
@@ -94,7 +95,7 @@ pub fn run() -> ! {
     );
 
     driver::type_text(&QString::from("second"));
-    driver::wait_ms(700);
+    driver::settle();
     shot("04-second-block");
     check(
         "typing continues in the new block",
@@ -103,7 +104,7 @@ pub fn run() -> ! {
     );
 
     driver::press_key(key::TAB, modifier::NONE);
-    driver::wait_ms(700);
+    driver::settle();
     shot("05-indent");
     check(
         "tab indented the block",
@@ -112,7 +113,7 @@ pub fn run() -> ! {
     );
 
     driver::press_key(key::BACKTAB, modifier::SHIFT);
-    driver::wait_ms(700);
+    driver::settle();
     shot("06-outdent");
     check(
         "shift+tab outdented it",
@@ -121,7 +122,7 @@ pub fn run() -> ! {
     );
 
     driver::press_key(key::Z, modifier::CTRL);
-    driver::wait_ms(700);
+    driver::settle();
     shot("07-undo");
     check(
         "ctrl+z undid the outdent",
@@ -145,7 +146,7 @@ pub fn run() -> ! {
     driver::press_key(key::END, modifier::NONE);
     driver::wait_ms(200);
     driver::type_text(&QString::from("!"));
-    driver::wait_ms(700);
+    driver::settle();
     shot("08-clicked");
     check(
         "clicking a block edits that block",
@@ -159,7 +160,7 @@ pub fn run() -> ! {
         driver::scroll_to_end();
         driver::wait_ms(300);
     }
-    driver::wait_ms(900);
+    driver::settle();
     shot("09-scrolled");
     let loaded_after = driver::journal_property(&QString::from("loaded_days")).to_string();
     check(
@@ -178,7 +179,7 @@ pub fn run() -> ! {
 
     // Ctrl+Enter marks the focused block.
     driver::press_key(key::RETURN, modifier::CTRL);
-    driver::wait_ms(700);
+    driver::settle();
     shot("10-todo");
     check(
         "ctrl+enter marks the block TODO",
@@ -192,7 +193,7 @@ pub fn run() -> ! {
     driver::wait_ms(400);
     shot("11-date-picker");
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(800);
+    driver::settle();
     shot("12-agenda");
     check(
         "picking today scheduled the block",
@@ -212,7 +213,7 @@ pub fn run() -> ! {
         driver::click_named(&QString::from("agendaCheck"), 0),
         "clicked the agenda checkbox".to_string(),
     );
-    driver::wait_ms(800);
+    driver::settle();
     shot("13-agenda-done");
     check(
         "checking it off marks the block DONE",
@@ -233,12 +234,12 @@ pub fn run() -> ! {
     driver::press_key(key::END, modifier::NONE);
     driver::wait_ms(100);
     driver::type_text(&QString::from(" and My Project matters"));
-    driver::wait_ms(700);
+    driver::settle();
     driver::press_key(key::DOWN, modifier::NONE);
     driver::wait_ms(200);
     driver::press_key(key::END, modifier::NONE);
     driver::type_text(&QString::from(" see [[My Project]]"));
-    driver::wait_ms(800);
+    driver::settle();
     shot("14-links-typed");
 
     // The page the link created is reachable from the bar's search; the sidebar will list it once it
@@ -246,10 +247,10 @@ pub fn run() -> ! {
     driver::press_key(key::K, modifier::CTRL);
     driver::wait_ms(300);
     driver::type_text(&QString::from("My Project"));
-    driver::wait_ms(800);
+    driver::settle();
     shot("15-search-for-page");
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(900);
+    driver::settle();
     shot("16-page-view");
     check(
         "the page created by the link can be opened from search",
@@ -276,7 +277,7 @@ pub fn run() -> ! {
 
     // The star in the page header stars it, which fills Favourites.
     let starred = driver::click_named(&QString::from("favouriteStar"), 0);
-    driver::wait_ms(800);
+    driver::settle();
     shot("16a-starred");
     let sidebar = driver::journal_property(&QString::from("sidebar")).to_string();
     check(
@@ -308,7 +309,7 @@ pub fn run() -> ! {
 
     // The theme button switches the whole window, and remembers it.
     let toggled = driver::click_named(&QString::from("themeButton"), 0);
-    driver::wait_ms(700);
+    driver::settle();
     shot("16b-dark-theme");
     check(
         "the theme button switches to dark",
@@ -316,7 +317,7 @@ pub fn run() -> ! {
         format!("theme={}", driver::journal_property(&QString::from("theme")).to_string()),
     );
     driver::click_named(&QString::from("themeButton"), 0);
-    driver::wait_ms(700);
+    driver::settle();
     check(
         "and back to light",
         driver::journal_property(&QString::from("theme")).to_string() == "light",
@@ -341,7 +342,7 @@ pub fn run() -> ! {
     );
 
     let followed = driver::click_named(&QString::from("sourceLabel"), 0);
-    driver::wait_ms(900);
+    driver::settle();
     shot("17a-from-label");
     check(
         "the from-label goes to the block it names",
@@ -349,7 +350,7 @@ pub fn run() -> ! {
         format!("rows={}", driver::row_count()),
     );
     driver::type_text(&QString::from("Z"));
-    driver::wait_ms(800);
+    driver::settle();
     check(
         "and the caret lands in that block",
         blocks(&root).iter().any(|block| block.contains('Z')),
@@ -357,7 +358,7 @@ pub fn run() -> ! {
     );
 
     let switched_back = driver::click_named(&QString::from("journalButton"), 0);
-    driver::wait_ms(900);
+    driver::settle();
     check(
         "the Journal button returns to the column",
         switched_back,
@@ -372,7 +373,7 @@ pub fn run() -> ! {
     driver::press_key(key::END, modifier::NONE);
     driver::wait_ms(100);
     driver::type_text(&QString::from(" **bold** and `code`"));
-    driver::wait_ms(700);
+    driver::settle();
     shot("18-markdown-typed");
 
     let typed = driver::editor_text(0).to_string();
@@ -384,10 +385,12 @@ pub fn run() -> ! {
 
     // ---- a block at rest renders its markdown ----------------------------------------------
     // Moving the caret to another block leaves this one showing its finished text.
-    driver::click_block(1);
-    driver::wait_ms(700);
+    // Aimed at the left of the row: its text contains a link, and clicking that would navigate.
+    driver::click_block_at(1, 0.12);
+    driver::settle();
     shot("19-block-at-rest");
-    let shown = driver::named_text(&QString::from("blockRendered"), 0).to_string();
+    wait_until(|| !driver::rendered_html().to_string().is_empty());
+    let shown = driver::rendered_html().to_string();
     check(
         "a block that is not being edited shows the finished text",
         shown.contains("font-weight:700")
@@ -402,7 +405,7 @@ pub fn run() -> ! {
     driver::click_block(0);
     driver::wait_ms(300);
     driver::type_text(&QString::from("~"));
-    driver::wait_ms(700);
+    driver::settle();
     shot("20-click-to-edit");
     let raw_after = driver::editor_text(0).to_string();
     check(
@@ -414,9 +417,11 @@ pub fn run() -> ! {
     // Typing the instant a rendered block is clicked: a person does not wait for the next frame, so the
     // keystrokes have to land rather than go nowhere.
     let before_instant = driver::editor_text(1).to_string();
-    driver::click_block(1);
+    // Past the end of the text, so the caret lands at the end and away from the row's link; the next step
+    // splits there and expects an empty tail.
+    driver::click_block_at(1, 0.95);
     driver::type_text(&QString::from("xyz"));
-    driver::wait_ms(800);
+    driver::settle();
     let after_instant = driver::editor_text(1).to_string();
     check(
         "typing straight after clicking a rendered block is not lost",
@@ -429,7 +434,7 @@ pub fn run() -> ! {
     driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(60);
     driver::type_text(&QString::from("qp"));
-    driver::wait_ms(800);
+    driver::settle();
     check(
         "typing straight after Enter is not lost",
         driver::editor_text(2).to_string() == "qp",
@@ -444,18 +449,18 @@ pub fn run() -> ! {
 
     // ---- starting a code block by typing ``` -----------------------------------------------
     // A new block, then the three backticks typed quickly — each keystroke landing inside the debounce
-    // window, which is what a person does.
-    driver::click_block(1);
+    // window, which is what a person does. Aimed left of the row's link.
+    driver::click_block_at(1, 0.12);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(700);
+    driver::settle();
     for _ in 0..3 {
         driver::type_text(&QString::from("`"));
         driver::wait_ms(90);
     }
-    driver::wait_ms(800);
+    driver::settle();
     shot("21-typing-backticks");
     let started = driver::editor_text(2).to_string();
     check(
@@ -487,7 +492,7 @@ pub fn run() -> ! {
     driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(150);
     driver::type_text(&QString::from("```"));
-    driver::wait_ms(1800);
+    driver::settle();
     shot("22-diagram");
 
     let fenced = blocks(&root);
@@ -509,8 +514,8 @@ pub fn run() -> ! {
 
     // ---- a fence that does not parse -------------------------------------------------------
     // Appended to the second block rather than split into a third: a split needs the caret and the row
-    // to agree, and this check is about the message, not about splitting.
-    driver::click_block(1);
+    // to agree, and this check is about the message, not about splitting. Aimed left of the row's link.
+    driver::click_block_at(1, 0.12);
     driver::wait_ms(300);
     driver::press_key(key::END, modifier::CTRL);
     driver::wait_ms(100);
@@ -520,7 +525,7 @@ pub fn run() -> ! {
     driver::press_key(key::RETURN, modifier::SHIFT);
     driver::wait_ms(150);
     driver::type_text(&QString::from("this is not a diagram"));
-    driver::wait_ms(1800);
+    driver::settle();
     shot("23-diagram-error");
 
     let error = driver::named_text(&QString::from("diagramError"), 0).to_string();
@@ -548,11 +553,11 @@ pub fn run() -> ! {
     driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(150);
     driver::type_text(&QString::from("```"));
-    driver::wait_ms(1200);
+    driver::settle();
 
     // Leave the block so it renders, then read its HTML.
     driver::click_block(0);
-    driver::wait_ms(800);
+    driver::settle();
     shot("24-python-fence");
     let code_html = driver::row_html(3).to_string();
     check(
@@ -572,7 +577,7 @@ pub fn run() -> ! {
     );
 
     driver::type_text(&QString::from("Project"));
-    driver::wait_ms(800);
+    driver::settle();
     shot("25-search");
     check(
         "typing finds the page and the blocks that mention it",
@@ -582,7 +587,7 @@ pub fn run() -> ! {
 
     // The page ranks first, so Enter opens it.
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(900);
+    driver::settle();
     shot("26-search-opened-page");
     let opened_page_rows = driver::row_count();
     check(
@@ -597,11 +602,11 @@ pub fn run() -> ! {
     // "world" appears only in block text, so the first hit is a block — and it is still one word, unlike
     // "matters", which an earlier step of this run split with a ~.
     driver::type_text(&QString::from("world"));
-    driver::wait_ms(800);
+    driver::settle();
     driver::press_key(key::RETURN, modifier::NONE);
-    driver::wait_ms(900);
+    driver::settle();
     driver::type_text(&QString::from("Q"));
-    driver::wait_ms(800);
+    driver::settle();
     shot("27-search-opened-block");
     check(
         "a block hit opens that block with the caret on the match",
@@ -619,7 +624,7 @@ pub fn run() -> ! {
         driver::click_link(1),
         "found a link under the pointer and clicked it".to_string(),
     );
-    driver::wait_ms(900);
+    driver::settle();
     shot("28-link-opened");
     let linked_rows = driver::row_count();
     check(
@@ -630,7 +635,7 @@ pub fn run() -> ! {
 
     // And the page it opened takes a keystroke — a page with no blocks used to fail here.
     driver::type_text(&QString::from("R"));
-    driver::wait_ms(800);
+    driver::settle();
     shot("29-link-typed");
     let on_page = page_blocks(&root, "My Project");
     check(
@@ -641,7 +646,7 @@ pub fn run() -> ! {
 
     // Back to the journal for the close test.
     driver::click_named(&QString::from("journalButton"), 0);
-    driver::wait_ms(900);
+    driver::settle();
 
     // Leave the caret where the close test expects it: at the end of the first block.
     driver::click_block(0);
@@ -694,6 +699,17 @@ fn blocks(root: &std::path::Path) -> Vec<String> {
     rows(root).into_iter().map(|block| block.content).collect()
 }
 
+/// Waits until `settled` holds, giving up after a few seconds. Every save rebuilds the model, so a read
+/// taken mid-rebuild can see a delegate that is not there yet.
+fn wait_until(settled: impl Fn() -> bool) {
+    for _ in 0..30 {
+        if settled() {
+            return;
+        }
+        driver::wait_ms(100);
+    }
+}
+
 fn page_blocks(root: &std::path::Path, name: &str) -> Vec<String> {
     let store = Store::open(root.join("lognotes.db")).expect("open the livetest database");
     let Some(page) = store.page_by_name(name).expect("read the page") else {
@@ -741,6 +757,7 @@ pub fn run_error() -> ! {
     let attached = match engine.as_mut() {
         Some(mut engine) => {
             engine.as_mut().load(&QUrl::from(MAIN_QML));
+            // Not `settle()`: it reads the model through the attached root, and there is none yet.
             driver::wait_ms(900);
             driver::attach(&engine)
         }

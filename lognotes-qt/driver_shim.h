@@ -25,6 +25,9 @@ bool lognotes_save_png(const QString& path);
 // Runs the event loop for `ms` so debounced saves and worker replies can land.
 void lognotes_wait_ms(int ms);
 
+// Waits until the model has stopped changing — the state a step should read from.
+void lognotes_settle();
+
 // Object name (or class name) of whatever holds keyboard focus — where a keystroke would go.
 QString lognotes_focus_name();
 
@@ -33,6 +36,10 @@ int lognotes_row_count();
 
 // Clicks the centre of the window's index-th visible block editor (0-based).
 bool lognotes_click_block(int index);
+
+// Clicks that row at `fraction` across its width — so a click meant only to move the caret can be aimed
+// away from a link, which would navigate instead.
+bool lognotes_click_block_at(int index, double fraction);
 
 // Text currently shown in the index-th visible block editor, or empty if there is none.
 QString lognotes_editor_text(int index);
@@ -52,6 +59,10 @@ bool lognotes_click_link(int index);
 
 // Whether any item with this objectName is on screen — how the sidebar's toggle is checked.
 bool lognotes_visible(const QString& name);
+
+// The HTML of every block row currently rendering its markdown, concatenated — so a check about the
+// rendering does not depend on which row happens to be at index 0.
+QString lognotes_rendered_html();
 
 // The HTML the index-th block row renders at rest — what the markdown, or a coloured fence, produced.
 QString lognotes_row_html(int index);

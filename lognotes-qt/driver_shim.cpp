@@ -88,6 +88,45 @@ bool lognotes_save_png(const QString& path) {
     return w->grabWindow().save(path);
 }
 
+void lognotes_settle() {
+    // Every save answers with a snapshot that resets the model, and each reset destroys and rebuilds the
+    // delegates. Reading state while that is in flight is how a harness lies to itself, so wait until the
+    // model has stopped changing for two ticks.
+    auto* model = journal_model();
+    if (!model) {
+        return;
+    }
+    // An empty column is not a settled one: wait for the store to answer before judging anything.
+    for (int spin = 0; spin < 100; ++spin) {
+        if (model->property("ready").toBool() || !model->property("error").toString().isEmpty()) {
+            break;
+        }
+        QEventLoop loop;
+        QTimer::singleShot(80, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+
+    // Longer than the 250 ms debounce, so the save a keystroke scheduled has had its chance to run before
+    // "nothing has changed" is taken to mean "settled".
+    {
+        QEventLoop loop;
+        QTimer::singleShot(350, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+
+    QVariant last = model->property("revision");
+    for (int tick = 0; tick < 60; ++tick) {
+        QEventLoop loop;
+        QTimer::singleShot(80, &loop, &QEventLoop::quit);
+        loop.exec();
+        const QVariant now = model->property("revision");
+        if (tick > 0 && now == last) {
+            return;
+        }
+        last = now;
+    }
+}
+
 void lognotes_wait_ms(int ms) {
     QEventLoop loop;
     QTimer::singleShot(ms, &loop, &QEventLoop::quit);
@@ -187,6 +226,10 @@ QQuickItem* editor_of(QQuickItem* row) {
 } // namespace
 
 bool lognotes_click_block(int index) {
+    return lognotes_click_block_at(index, 0.5);
+}
+
+bool lognotes_click_block_at(int index, double fraction) {
     auto* w = window();
     const auto rows = block_rows();
     if (!w || index < 0 || index >= rows.size()) {
@@ -196,7 +239,8 @@ bool lognotes_click_block(int index) {
     if (!item) {
         item = rows.at(index);
     }
-    const QPointF centre = item->mapToScene(QPointF(item->width() / 2.0, item->height() / 2.0));
+    const QPointF centre =
+        item->mapToScene(QPointF(item->width() * fraction, item->height() / 2.0));
     const QPointF global = w->mapToGlobal(centre.toPoint());
 
     QMouseEvent press(QEvent::MouseButtonPress, centre, global, Qt::LeftButton, Qt::LeftButton,
@@ -328,6 +372,20 @@ bool lognotes_visible(const QString& name) {
     QList<QQuickItem*> matches;
     collect_named(w->contentItem(), name, matches);
     return !matches.isEmpty();
+}
+
+QString lognotes_rendered_html() {
+    auto* w = window();
+    if (!w) {
+        return QString();
+    }
+    QList<QQuickItem*> rendered;
+    collect_named(w->contentItem(), QStringLiteral("blockRendered"), rendered);
+    QString all;
+    for (auto* item : rendered) {
+        all += item->property("text").toString();
+    }
+    return all;
 }
 
 QString lognotes_row_html(int row) {
