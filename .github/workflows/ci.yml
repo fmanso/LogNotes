@@ -29,6 +29,8 @@ jobs:
           python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
           echo "QTDIR=$HOME/Qt/$QT_VERSION/gcc_64" >> "$GITHUB_ENV"
           echo "$HOME/Qt/$QT_VERSION/gcc_64/bin" >> "$GITHUB_PATH"
+          # The test binaries link against Qt at runtime, not only at build time.
+          echo "LD_LIBRARY_PATH=$HOME/Qt/$QT_VERSION/gcc_64/lib" >> "$GITHUB_ENV"
 
       - name: A C++ toolchain and the GL headers Qt Quick links against
         run: |

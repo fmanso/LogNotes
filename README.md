@@ -34,7 +34,9 @@ and export exist so that staying put is a choice rather than a trap.
 
 ## Running it
 
-Requires Rust (stable), Qt 6 with development headers, and a C++ toolchain (cxx-qt builds the bridge).
+Requires Rust (stable), Qt 6.8 or newer with development headers, and a C++ toolchain (cxx-qt builds the
+bridge). The Linux tarball produced by `make dist` is linked against whatever Qt it was built with, so it
+needs that version or newer on the machine that runs it; the Windows zip carries its Qt libraries.
 
 ```bash
 make run          # build and start the app
