@@ -171,6 +171,24 @@ pub mod qobject {
         #[qinvokable]
         fn set_marker(self: Pin<&mut Self>, row: i32, marker: &QString);
 
+        /// Set a block's marker and the text a slash command rewrote, as one undo step.
+        #[qinvokable]
+        fn set_marker_with_content(
+            self: Pin<&mut Self>,
+            row: i32,
+            marker: &QString,
+            text: &QString,
+        );
+
+        /// The same, for a scheduled date with the text the command rewrote.
+        #[qinvokable]
+        fn set_scheduled_with_content(
+            self: Pin<&mut Self>,
+            row: i32,
+            date: &QString,
+            text: &QString,
+        );
+
         /// Show the journal column again.
         #[qinvokable]
         fn show_journal(self: Pin<&mut Self>);
@@ -353,9 +371,22 @@ enum Command {
     Delete { block_id: i32 },
     CycleMarker { block_id: i32 },
     SetMarker { block_id: i32, marker: Option<Marker> },
+    /// A slash command's marker with the text it rewrote, so one undo takes back both halves.
+    SetMarkerWithContent { block_id: i32, marker: Option<Marker>, text: String },
     SetScheduled { block_id: i32, date: Option<String> },
+    SetScheduledWithContent { block_id: i32, date: Option<String>, text: String },
     Undo,
     Redo,
+}
+
+/// The marker a slash command or a checkbox names, or `None` for "no marker".
+fn parse_marker(raw: &str) -> Option<Marker> {
+    match raw {
+        "TODO" => Some(Marker::Todo),
+        "DOING" => Some(Marker::Doing),
+        "DONE" => Some(Marker::Done),
+        _ => None,
+    }
 }
 
 enum Job {
@@ -380,6 +411,16 @@ enum Job {
     },
 }
 
+/// The page in view, when the column is showing one instead of the journal.
+struct PageView {
+    name: String,
+    /// Set when this page *is* a journal day — a date is a name a block can link to. The header renders
+    /// it as a day heading, and the star is hidden: journal days never appear in the sidebar.
+    journal_date: Option<String>,
+    blocks: Vec<BlockRow>,
+    references: Vec<ReferenceRow>,
+}
+
 /// What the worker sends back to the GUI thread.
 struct Outcome {
     error: Option<String>,
@@ -387,8 +428,8 @@ struct Outcome {
     agenda: Vec<AgendaRow>,
     /// Diagrams drawn for blocks on the worker thread, by block id.
     diagrams: HashMap<i64, Drawn>,
-    /// Set when the column is showing a named page: its name, its blocks, its references.
-    page: Option<(String, Vec<BlockRow>, Vec<ReferenceRow>)>,
+    /// Set when the column is showing a named page: what it is called, and what it holds.
+    page: Option<PageView>,
     /// The sidebar as `{"favourites": […], "recent": […]}`.
     sidebar: String,
     /// "light" or "dark", from the store's settings.
@@ -612,14 +653,44 @@ impl qobject::Journal {
 
     fn set_marker(mut self: Pin<&mut Self>, row: i32, marker: &QString) {
         if let Some(block_id) = self.block_at(row) {
-            let marker = match marker.to_string().as_str() {
-                "TODO" => Some(Marker::Todo),
-                "DOING" => Some(Marker::Doing),
-                "DONE" => Some(Marker::Done),
-                _ => None,
-            };
+            let marker = parse_marker(&marker.to_string());
             self.as_mut()
                 .dispatch(Some(Command::SetMarker { block_id, marker }));
+        }
+    }
+
+    fn set_marker_with_content(
+        mut self: Pin<&mut Self>,
+        row: i32,
+        marker: &QString,
+        text: &QString,
+    ) {
+        if let Some(block_id) = self.block_at(row) {
+            let marker = parse_marker(&marker.to_string());
+            let text = text.to_string();
+            self.as_mut().dispatch(Some(Command::SetMarkerWithContent {
+                block_id,
+                marker,
+                text,
+            }));
+        }
+    }
+
+    fn set_scheduled_with_content(
+        mut self: Pin<&mut Self>,
+        row: i32,
+        date: &QString,
+        text: &QString,
+    ) {
+        if let Some(block_id) = self.block_at(row) {
+            let date = date.to_string();
+            let text = text.to_string();
+            let date = if date.is_empty() { None } else { Some(date) };
+            self.as_mut().dispatch(Some(Command::SetScheduledWithContent {
+                block_id,
+                date,
+                text,
+            }));
         }
     }
 
@@ -780,14 +851,14 @@ impl qobject::Journal {
         {
             let agenda = agenda_rows(&outcome.agenda);
             let mut rows = Vec::new();
-            if let Some((name, blocks, references)) = &outcome.page {
-                rows.push(page_header(name));
+            if let Some(page) = &outcome.page {
+                rows.push(page_header(&page.name, page.journal_date.as_deref()));
                 rows.extend(
-                    day_rows(name, blocks, &outcome.diagrams, &outcome.theme)
+                    day_rows(&page.name, &page.blocks, &outcome.diagrams, &outcome.theme)
                         .into_iter()
                         .skip(1),
                 );
-                rows.extend(reference_rows(references));
+                rows.extend(reference_rows(&page.references));
                 focus = row_of_block(&rows, pending);
                 let mut rust = self.as_mut().rust_mut();
                 rust.pending_focus = -1;
@@ -1004,8 +1075,22 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
         Command::SetMarker { block_id, marker } => store
             .set_marker(block_id as i64, marker)
             .map_err(fail),
+        Command::SetMarkerWithContent {
+            block_id,
+            marker,
+            text,
+        } => store
+            .set_marker_with_content(block_id as i64, marker, &text)
+            .map_err(fail),
         Command::SetScheduled { block_id, date } => store
             .set_scheduled(block_id as i64, date.as_deref())
+            .map_err(fail),
+        Command::SetScheduledWithContent {
+            block_id,
+            date,
+            text,
+        } => store
+            .set_scheduled_with_content(block_id as i64, date.as_deref(), &text)
             .map_err(fail),
         Command::Undo => store.undo().map(|_| ()).map_err(fail),
         Command::Redo => store.redo().map(|_| ()).map_err(fail),
@@ -1037,19 +1122,29 @@ fn snapshot(
             ),
             None => (Vec::new(), Vec::new()),
         };
+        let journal_date = page.as_ref().and_then(|page| page.journal_date.clone());
         let drawn = drawn_for(&blocks, diagrams, theme);
+        let view = PageView {
+            name: name.clone(),
+            journal_date,
+            blocks,
+            references,
+        };
         return Outcome {
             error: None,
             days: Vec::new(),
             agenda: Vec::new(),
             diagrams: drawn,
-            page: Some((name.clone(), blocks, references)),
+            // A day is never starred: the sidebar lists named pages, so a star on one would lead
+            // nowhere. Everything else follows the store.
+            page_favourite: match (&view.journal_date, &page) {
+                (Some(_), _) => false,
+                (None, Some(page)) => store.is_favourite(page.id).ok().unwrap_or(false),
+                (None, None) => false,
+            },
+            page: Some(view),
             sidebar: sidebar_json(store),
             theme: theme.to_string(),
-            page_favourite: page
-                .as_ref()
-                .and_then(|page| store.is_favourite(page.id).ok())
-                .unwrap_or(false),
             ready: true,
             can_undo: store.can_undo(),
             can_redo: store.can_redo(),
@@ -1174,10 +1269,11 @@ fn day_rows(
     rows
 }
 
-fn page_header(name: &str) -> Row {
+fn page_header(name: &str, journal_date: Option<&str>) -> Row {
     Row {
         kind: Kind::PageHeader,
-        date: String::new(),
+        // A day page's header reads as a day; a named page's header carries no date at all.
+        date: journal_date.unwrap_or_default().to_string(),
         block_id: -1,
         depth: 0,
         text: name.to_string(),
@@ -1531,6 +1627,91 @@ mod tests {
             .into_iter()
             .map(|block| block.content)
             .collect()
+    }
+
+    /// A slash command's text and its state arrive as one bridge call, so undo takes back the command as
+    /// the user performed it and not one half of it.
+    #[test]
+    fn a_slash_command_writes_its_text_and_its_state_in_one_command() {
+        let mut store = session();
+        let day = store.ensure_journal_page("2026-04-13").unwrap();
+        let block = store.insert_block(day, None, "order filament /todo").unwrap() as i32;
+
+        run_command(
+            &mut store,
+            Command::SetMarkerWithContent {
+                block_id: block,
+                marker: Some(Marker::Todo),
+                text: "order filament".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocks(&store, "2026-04-13"), ["order filament"]);
+        assert_eq!(store.page_blocks(day).unwrap()[0].marker, Some(Marker::Todo));
+
+        run_command(&mut store, Command::Undo).unwrap();
+        assert_eq!(blocks(&store, "2026-04-13"), ["order filament /todo"]);
+        assert_eq!(store.page_blocks(day).unwrap()[0].marker, None);
+
+        run_command(
+            &mut store,
+            Command::SetScheduledWithContent {
+                block_id: block,
+                date: Some("2026-04-14".into()),
+                text: "order filament /scheduled".into(),
+            },
+        )
+        .unwrap();
+        let row = &store.page_blocks(day).unwrap()[0];
+        assert_eq!(row.content, "order filament /scheduled");
+        assert_eq!(row.scheduled_date.as_deref(), Some("2026-04-14"));
+    }
+
+    /// A date is a name for a journal day, so a page view of one carries the day in the header's `date`
+    /// role — that is what makes the header read as a day and hides the star.
+    #[test]
+    fn a_day_shown_as_a_page_carries_its_date_and_no_star() {
+        let mut store = session();
+        let day = store.ensure_journal_page("2026-04-13").unwrap();
+        store.insert_block(day, None, "written that day").unwrap();
+        store.set_favourite(day, true).unwrap();
+
+        let mut diagrams = Diagrams::default();
+        let outcome = snapshot(
+            &store,
+            &[],
+            &Mode::Page("2026-04-13".into()),
+            &mut diagrams,
+            "light",
+        );
+        let page = outcome.page.expect("a page view");
+        assert_eq!(page.journal_date.as_deref(), Some("2026-04-13"));
+        assert_eq!(page.blocks.len(), 1);
+        assert!(
+            !outcome.page_favourite,
+            "a journal day takes no star, even one the store says is starred"
+        );
+        let header = page_header(&page.name, page.journal_date.as_deref());
+        assert_eq!(header.kind, Kind::PageHeader);
+        assert_eq!(header.date, "2026-04-13");
+    }
+
+    #[test]
+    fn a_named_page_has_no_date_in_its_header() {
+        let mut store = session();
+        store.ensure_page("My Project").unwrap();
+
+        let mut diagrams = Diagrams::default();
+        let outcome = snapshot(
+            &store,
+            &[],
+            &Mode::Page("My Project".into()),
+            &mut diagrams,
+            "light",
+        );
+        let page = outcome.page.expect("a page view");
+        assert_eq!(page.journal_date, None);
+        assert_eq!(page_header(&page.name, page.journal_date.as_deref()).date, "");
     }
 
     #[test]

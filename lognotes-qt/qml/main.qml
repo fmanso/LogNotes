@@ -87,6 +87,7 @@ ApplicationWindow {
 
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
     function openPage(name) {
+        root.closeSlash()
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -97,6 +98,7 @@ ApplicationWindow {
     }
 
     function goJournal() {
+        root.closeSlash()
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -288,6 +290,7 @@ ApplicationWindow {
     // in it, and a frame's delay loses the character. The deferred attempt stays for the case where the
     // delegate for that row is not instantiated yet.
     function beginEdit(row, caret) {
+        root.closeSlash()
         root.editingRow = row
         root.focusRow = row
         root.focusCursor = Math.max(0, caret)
@@ -344,6 +347,212 @@ ApplicationWindow {
         return Qt.formatDate(new Date(iso + "T12:00:00"), "MMM d")
     }
 
+    // ---- the slash menu ----------------------------------------------------------------------
+    // Typing "/" where it begins a word opens a list of the block's commands beside the caret. The
+    // state lives on the window, not in a delegate: every save rebuilds the delegates, and the menu has
+    // to outlive the editor the caret is in.
+    property int slashRow: -1
+    property int slashStart: -1
+    property int slashEnd: -1
+    property var slashItems: []
+    property int slashSelected: 0
+    property point slashAnchor: Qt.point(0, 0)
+    // The block's text, and the text the store holds, as of the last refresh: what closing has to write,
+    // and what it may skip writing.
+    property string slashText: ""
+    property string slashSaved: ""
+    // A command whose dialog is open — what the token was, so accepting rewrites the block in the same
+    // step the date lands in, and cancelling leaves the token as typed.
+    property var slashPending: null
+
+    // Every block command. `match` is what typing after the "/" filters on, so "/sch" and "/due" both
+    // find Scheduled while the name stays short. Every one acts on the block's real state: none of them
+    // types markdown into the text.
+    readonly property var blockCommands: [
+        { name: "TODO", description: qsTr("Mark this block as a task"), match: "todo task", action: "todo" },
+        { name: "DOING", description: qsTr("Mark this block as in progress"), match: "doing", action: "doing" },
+        { name: "DONE", description: qsTr("Mark this block as done"), match: "done complete", action: "done" },
+        { name: "Remove status", description: qsTr("Take the task marker off"), match: "remove status clear marker", action: "no-status" },
+        { name: "Scheduled", description: qsTr("Pick the date this block is due"), match: "scheduled schedule due", action: "scheduled" },
+        { name: "Clear date", description: qsTr("Take the scheduled date off"), match: "clear date scheduled", action: "no-scheduled" },
+        { name: "Today", description: qsTr("Link to today's journal day"), match: "today", action: "today" },
+        { name: "Tomorrow", description: qsTr("Link to tomorrow's day"), match: "tomorrow", action: "tomorrow" },
+        { name: "Pick a date", description: qsTr("Link to a day you choose"), match: "date pick calendar", action: "pick-date" },
+        { name: "Time", description: qsTr("Insert the current time"), match: "time now clock", action: "time" }
+    ]
+
+    // A run of non-whitespace text that begins with "/" is a command token, so "/" at the start of a
+    // block or after a space opens the menu — and "and/or" or a URL never does.
+    function slashTokenAt(text, caret) {
+        let start = caret
+        while (start > 0 && !/[\s]/.test(text.charAt(start - 1))) {
+            start -= 1
+        }
+        if (text.charAt(start) !== "/") {
+            return null
+        }
+        return { start: start, end: caret, query: text.substring(start + 1, caret) }
+    }
+
+    // What the query leaves of the command list, in table order: a word of its name or of its `match`
+    // string has to start with what was typed.
+    function slashMatches(query) {
+        const needle = query.toLowerCase()
+        let found = []
+        for (let i = 0; i < root.blockCommands.length; i++) {
+            const command = root.blockCommands[i]
+            const words = (command.name + " " + command.match).toLowerCase().split(" ")
+            for (let w = 0; w < words.length; w++) {
+                if (words[w].startsWith(needle)) {
+                    found.push(command)
+                    break
+                }
+            }
+        }
+        return found
+    }
+
+    // Open (or move) the menu for the token the caret is in. `anchor` is the caret's rectangle in the
+    // window, so the list sits under the character being typed rather than under the block.
+    function openSlash(row, token, text, saved, anchor) {
+        root.slashRow = row
+        root.slashStart = token.start
+        root.slashEnd = token.end
+        root.slashText = text
+        root.slashSaved = saved
+        root.slashAnchor = anchor
+        root.slashItems = root.slashMatches(token.query)
+        root.slashSelected = 0
+    }
+
+    // Forget the menu without writing anything: the text keeps changing under it, or the caret left the
+    // token and the ordinary debounce will save as usual.
+    function dropSlash() {
+        root.slashRow = -1
+        root.slashItems = []
+    }
+
+    // Leave the menu from somewhere that is about to take the editor away: the token stays as ordinary
+    // text, and has to be written here because saving is held while the menu is open.
+    function closeSlash() {
+        if (root.slashRow < 0) {
+            return
+        }
+        const row = root.slashRow
+        const text = root.slashText
+        const saved = root.slashSaved
+        root.dropSlash()
+        if (text !== saved && !root.rebuilding) {
+            root.rebuilding = true
+            journal.edit(row, text)
+        }
+    }
+
+    // Where the caret sits in the window, in the overlay's own coordinates: the menu hangs from the
+    // character being typed rather than from the block, so it follows the text.
+    function caretAnchor(editor) {
+        const rect = editor.positionToRectangle(editor.cursorPosition)
+        return editor.mapToItem(Overlay.overlay, rect.x, rect.y + rect.height + 4)
+    }
+
+    // The block's text with the token swapped for `replacement`; the whole point of the menu is that the
+    // token does not survive the command.
+    function slashRewrite(replacement) {
+        return root.slashText.substring(0, root.slashStart) + replacement
+                + root.slashText.substring(root.slashEnd)
+    }
+
+    function isoAfter(days) {
+        const when = new Date()
+        when.setDate(when.getDate() + days)
+        return Qt.formatDate(when, "yyyy-MM-dd")
+    }
+
+    // Pick a dialog command off the menu: the token waits, and the dialog's accept rewrites the block in
+    // the same step the date lands in.
+    function slashDialog(purpose) {
+        root.slashPending = {
+            row: root.slashRow,
+            start: root.slashStart,
+            end: root.slashEnd,
+            text: root.slashText,
+            saved: root.slashSaved,
+            purpose: purpose
+        }
+        const row = root.slashRow
+        root.dropSlash()
+        // Next turn, not this one: the menu is closing as part of this key press, and a dialog opened
+        // under it while the overlay is still tearing that popup down ends up with the focus but not
+        // the keys — Enter then goes nowhere at all.
+        Qt.callLater(datePopup.openFor, row, purpose)
+    }
+
+    // Run one command against the block the menu belongs to. Every write is a single command, so one
+    // Ctrl+Z takes the whole command back — the token's removal included.
+    function runSlash(action) {
+        const row = root.slashRow
+        if (row < 0) {
+            return
+        }
+        const start = root.slashStart
+        const item = list.itemAtIndex(row)
+        const editor = item && item.blockEditor ? item.blockEditor : null
+
+        if (action === "scheduled" || action === "pick-date") {
+            root.slashDialog(action === "scheduled" ? "schedule" : "insert")
+            return
+        }
+
+        let rewritten = root.slashRewrite("")
+        let caret = start
+        if (action === "today" || action === "tomorrow") {
+            const link = "[[" + root.isoAfter(action === "today" ? 0 : 1) + "]]"
+            rewritten = root.slashRewrite(link)
+            caret = start + link.length
+        } else if (action === "time") {
+            const stamp = Qt.formatTime(new Date(), "HH:mm")
+            rewritten = root.slashRewrite(stamp)
+            caret = start + stamp.length
+        }
+
+        // This block's text is about to come back from the store, so the copy held for the close-time
+        // flush is dropped rather than written again on the way out.
+        const unsaved = ({})
+        for (const key in root.unsaved) {
+            if (Number(key) !== row) {
+                unsaved[key] = root.unsaved[key]
+            }
+        }
+        root.unsaved = unsaved
+
+        root.dropSlash()
+        root.editingRow = row
+        root.focusRow = row
+        root.focusCursor = caret
+        root.wantsFocus = true
+        root.rebuilding = true
+        const status = { "todo": "TODO", "doing": "DOING", "done": "DONE", "no-status": "" }[action]
+        if (status !== undefined) {
+            journal.set_marker_with_content(row, status, rewritten)
+        } else if (action === "no-scheduled") {
+            journal.set_scheduled_with_content(row, "", rewritten)
+        } else {
+            journal.edit(row, rewritten)
+        }
+        // Take the old token out of the editor in the same breath, so the block never shows the command
+        // it just ran while the answer is on its way.
+        if (editor) {
+            editor.text = rewritten
+        }
+    }
+
+    function pickSlash(index) {
+        if (index < 0 || index >= root.slashItems.length) {
+            return
+        }
+        root.runSlash(root.slashItems[index].action)
+    }
+
     ListModel {
         id: searchModel
     }
@@ -362,6 +571,7 @@ ApplicationWindow {
 
     // Typing in the bar is what opens the results; Ctrl+K only puts the caret there.
     function focusSearch() {
+        root.closeSlash()
         root.editingRow = -1
         searchField.forceActiveFocus()
         searchField.selectAll()
@@ -436,11 +646,102 @@ ApplicationWindow {
         }
     }
 
+    // The block command menu. It takes no focus (`focus: false`), so every keystroke keeps arriving in
+    // the block's editor, whose key handler owns Up/Down/Enter/Esc while this is up; the rows are picked
+    // with a tap. Closing it from outside — a click on another block — has to write what was typed,
+    // because saving is held for as long as it is open.
+    Popup {
+        id: slashMenu
+        objectName: "slashPopup"
+        parent: Overlay.overlay
+        visible: root.slashRow >= 0 && root.slashItems.length > 0
+        focus: false
+        modal: false
+        closePolicy: Popup.CloseOnPressOutside
+        width: 320
+        padding: 5
+
+        // Under the caret, kept inside the window: a command menu that opens off the edge of the
+        // window is a command menu nobody can read.
+        x: Math.max(12, Math.min(root.slashAnchor.x, root.width - width - 12))
+        y: {
+            const below = root.slashAnchor.y
+            return below + implicitHeight > root.height - 12
+                    ? Math.max(12, below - implicitHeight - 28) : below
+        }
+
+        background: Rectangle {
+            color: theme.page
+            border.color: theme.border
+            radius: 8
+        }
+
+        onClosed: root.closeSlash()
+
+        Column {
+            id: slashColumn
+            objectName: "slashMenu"
+            width: parent.width
+            spacing: 1
+
+            Repeater {
+                model: root.slashItems
+
+                delegate: Rectangle {
+                    objectName: "slashRow"
+                    width: slashColumn.width
+                    height: 27
+                    radius: 6
+                    color: index === root.slashSelected ? theme.hover : "transparent"
+
+                    Label {
+                        text: modelData.name
+                        color: theme.text
+                        font.pixelSize: 13
+                        font.bold: true
+                        width: 120
+                        elide: Text.ElideRight
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Label {
+                        text: modelData.description
+                        color: theme.textFaint
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                        anchors.left: parent.left
+                        anchors.leftMargin: 136
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    TapHandler {
+                        onSingleTapped: root.pickSlash(index)
+                    }
+
+                    HoverHandler {
+                        onHoveredChanged: {
+                            if (hovered) {
+                                root.slashSelected = index
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Picking a date is one popup, one decision, Esc always backs out. Qt 6.12 ships Controls'
     // `Calendar` as a singleton that cannot be instantiated, so this is built from MonthGrid.
     Popup {
         id: datePopup
         property int row: -1
+        // "schedule" sets the block's scheduled date; "insert" writes the picked day into the block as a
+        // link, which is what the date commands do.
+        property string purpose: "schedule"
         property date monthAnchor: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
         property date picked: new Date()
 
@@ -456,8 +757,9 @@ ApplicationWindow {
             radius: 8
         }
 
-        function openFor(rowIndex) {
+        function openFor(rowIndex, why) {
             row = rowIndex
+            purpose = why === undefined ? "schedule" : why
             picked = new Date()
             monthAnchor = new Date(picked.getFullYear(), picked.getMonth(), 1)
             open()
@@ -468,10 +770,46 @@ ApplicationWindow {
             monthAnchor = new Date(picked.getFullYear(), picked.getMonth(), 1)
         }
 
+        // The block's text with the token swapped for `insert` — empty for the commands that only change
+        // state, the day's link for the ones that write it down. It takes the pending record rather than
+        // reading it back, because accepting clears it before the write.
+        function rewrite(pending, insert) {
+            return pending.text.substring(0, pending.start) + insert
+                    + pending.text.substring(pending.end)
+        }
+
+        // One write, so one Ctrl+Z: the token's removal and the date land together.
         function accept() {
-            if (row >= 0) {
+            const iso = Qt.formatDate(picked, "yyyy-MM-dd")
+            const pending = root.slashPending
+            const text = pending !== null ? rewrite(pending, purpose === "insert" ? "[[" + iso + "]]" : "") : ""
+            root.slashPending = null
+            root.rebuilding = true
+            if (pending !== null) {
+                const link = purpose === "insert" ? "[[" + iso + "]]" : ""
+                root.editingRow = pending.row
+                root.focusRow = pending.row
+                root.focusCursor = pending.start + link.length
+                root.wantsFocus = true
+                if (purpose === "insert") {
+                    journal.edit(pending.row, text)
+                } else {
+                    journal.set_scheduled_with_content(pending.row, iso, text)
+                }
+            } else if (row >= 0) {
+                journal.set_scheduled(row, iso)
+            }
+            close()
+        }
+
+        // Backing out leaves the token exactly as it was typed, and writes it: the menu had taken saving
+        // out of the debounce's hands.
+        function cancel() {
+            const pending = root.slashPending
+            root.slashPending = null
+            if (pending !== null && pending.text !== pending.saved) {
                 root.rebuilding = true
-                journal.set_scheduled(row, Qt.formatDate(picked, "yyyy-MM-dd"))
+                journal.edit(pending.row, pending.text)
             }
             close()
         }
@@ -480,6 +818,7 @@ ApplicationWindow {
 
         Column {
             id: popupContent
+            objectName: "datePopupContent"
             focus: true
             spacing: 8
 
@@ -488,7 +827,7 @@ ApplicationWindow {
                     datePopup.accept()
                     event.accepted = true
                 } else if (event.key === Qt.Key_Escape) {
-                    datePopup.close()
+                    datePopup.cancel()
                     event.accepted = true
                 } else if (event.key === Qt.Key_Left) {
                     datePopup.shift(-1)
@@ -551,11 +890,24 @@ ApplicationWindow {
 
                 QuietButton {
                     text: qsTr("Clear")
+                    visible: datePopup.purpose === "schedule"
                     onClicked: {
+                        const pending = root.slashPending
+                        const text = pending !== null ? datePopup.rewrite(pending, "") : ""
+                        root.slashPending = null
                         root.rebuilding = true
-                        journal.set_scheduled(datePopup.row, "")
+                        if (pending !== null) {
+                            journal.set_scheduled_with_content(pending.row, "", text)
+                        } else {
+                            journal.set_scheduled(datePopup.row, "")
+                        }
                         datePopup.close()
                     }
+                }
+
+                QuietButton {
+                    text: qsTr("Cancel")
+                    onClicked: datePopup.cancel()
                 }
 
                 QuietButton {
@@ -1015,12 +1367,13 @@ ApplicationWindow {
             // A date heading, or the "Scheduled" section heading.
             Label {
                 id: sectionHeading
-                objectName: kind === "unlinked-header" ? "unlinkedToggle" : ""
+                objectName: kind === "page-header" ? "pageHeading"
+                           : (kind === "unlinked-header" ? "unlinkedToggle" : "")
                 visible: rowItem.isHeading
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 4
-                text: kind === "heading"
+                text: (kind === "heading" || (kind === "page-header" && model.date !== ""))
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
                       : model.text
                 color: kind === "page-header" ? theme.text : theme.textMuted
@@ -1042,7 +1395,9 @@ ApplicationWindow {
             Item {
                 id: favouriteStar
                 objectName: "favouriteStar"
-                visible: kind === "page-header"
+                // A journal day carries a date in that role, and never takes a star: the sidebar lists
+                // named pages, so a star there would lead nowhere.
+                visible: kind === "page-header" && model.date === ""
                 width: 32
                 height: 32
                 anchors.right: parent.right
@@ -1193,11 +1548,21 @@ ApplicationWindow {
                         }
                     }
 
-                    onTextEdited: {
-                        root.focusRow = index
-                        root.focusCursor = cursorPosition
-                        root.wantsFocus = true
-                        root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
+                    // The text and the caret decide whether the command menu is up. A token under the
+                    // caret opens it and takes saving out of the debounce's hands — saving would rebuild
+                    // the model, destroy this editor, and with it the caret rectangle the menu hangs
+                    // from. Anything else closes the menu and gives saving back.
+                    function syncSlash() {
+                        const token = root.slashTokenAt(editor.text, editor.cursorPosition)
+                        if (token !== null && root.slashMatches(token.query).length > 0) {
+                            debounce.stop()
+                            root.openSlash(index, token, editor.text, model.text,
+                                           root.caretAnchor(editor))
+                            return
+                        }
+                        if (root.slashRow === index) {
+                            root.dropSlash()
+                        }
                         // An input method composes a character before it is text — a dead key on the
                         // Spanish layout is one — and saving now would rebuild the model, destroy the
                         // editor holding the composition, and take the character with it. Wait for the
@@ -1207,6 +1572,23 @@ ApplicationWindow {
                         }
                     }
 
+                    onTextEdited: {
+                        root.focusRow = index
+                        root.focusCursor = cursorPosition
+                        root.wantsFocus = true
+                        root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
+                        syncSlash()
+                    }
+
+                    // Moving the caret off the token — or back over it with Backspace — is the menu
+                    // losing its subject, not a command being cancelled.
+                    onCursorPositionChanged: {
+                        if (root.rebuilding || (root.slashRow !== index && root.slashRow !== -1)) {
+                            return
+                        }
+                        syncSlash()
+                    }
+
                     onInputMethodComposingChanged: {
                         if (!inputMethodComposing) {
                             debounce.restart()
@@ -1214,6 +1596,33 @@ ApplicationWindow {
                     }
 
                     Keys.onPressed: (event) => {
+                        // The menu is open under this block, so it owns the navigation keys before the
+                        // block does: Enter picks a command instead of splitting, Up/Down move the
+                        // highlight instead of the caret, Esc leaves the token as ordinary text.
+                        if (root.slashRow === index && root.slashItems.length > 0) {
+                            const count = root.slashItems.length
+                            if (event.key === Qt.Key_Down) {
+                                root.slashSelected = (root.slashSelected + 1) % count
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Up) {
+                                root.slashSelected = (root.slashSelected + count - 1) % count
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                debounce.stop()
+                                root.pickSlash(root.slashSelected)
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Escape) {
+                                root.dropSlash()
+                                if (!editor.inputMethodComposing) {
+                                    debounce.restart()
+                                }
+                                event.accepted = true
+                                return
+                            }
+                        }
                         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
                             if ((event.modifiers & Qt.ShiftModifier)
