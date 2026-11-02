@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # So the release workflow can build both platforms in one place instead of keeping a second copy of
+  # these steps.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
