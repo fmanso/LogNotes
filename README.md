@@ -32,6 +32,12 @@ Built for one person's daily use, and honest about it: Linux is where it is deve
 builds in CI. There is no sync, no plugin host, and no Markdown mirror — the database is canonical. Backup
 and export exist so that staying put is a choice rather than a trap.
 
+## Downloading a build
+
+[v0.1.0](https://github.com/fmanso/LogNotes/releases) — a Linux tarball (binary, `.desktop` entry, icon) and
+a Windows zip that carries its Qt libraries, with `SHA256SUMS.txt` beside them. Pushing a `v*` tag is what
+publishes a release: CI builds both platforms and attaches them.
+
 ## Running it
 
 Requires Rust (stable), Qt 6.8 or newer with development headers, and a C++ toolchain (cxx-qt builds the
