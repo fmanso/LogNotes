@@ -89,3 +89,8 @@ bool lognotes_window_visible();
 
 // Whether the journal model reports itself ready.
 bool lognotes_journal_ready();
+
+// Calls an invokable on the journal model with one string argument — what the settings page's file
+// dialogs do once they return. A native folder dialog cannot be driven headlessly, so the step after it
+// is driven here instead.
+bool lognotes_call_journal(const QString& method, const QString& argument);

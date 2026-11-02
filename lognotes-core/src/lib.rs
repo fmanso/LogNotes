@@ -7,6 +7,7 @@
 
 pub mod code;
 mod error;
+pub mod export;
 pub mod markdown;
 mod model;
 mod order;
@@ -14,6 +15,7 @@ mod store;
 mod text;
 
 pub use error::{Error, Result};
+pub use export::{Moved, export_markdown, import_markdown};
 pub use model::{
     AgendaRow, BlockHit, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind, ReferenceRow,
     SearchResults,

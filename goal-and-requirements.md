@@ -67,6 +67,10 @@ application small enough to fully own and trim.
 - **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names and written journal days
   first, then blocks whose text matches, as you type. `Enter` opens the page or day, or puts the caret on the
   match in the block it found.
+- **Your notes are not locked in.** A Settings page says where the database and its backups live and opens
+  either folder in the file manager; a backup is written once a day as the notes open (the newest seven
+  kept) and on demand; export writes every page and day as Markdown, in the folders Logseq 0.x reads; and
+  import reads such a folder back in, so a graph can leave this app and come back.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the
   app works fully offline with no account.
 

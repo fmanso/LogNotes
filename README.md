@@ -25,12 +25,16 @@ diagrams — and the block you are typing in stays plain text.
 - **A shell you can work from.** A sidebar of favourites and recently opened pages, a way back to the
   journal, and a light/dark theme that is remembered.
 - **One local file.** Notes live in a single SQLite database; the app works fully offline, with no account.
+- **Not locked in.** A daily backup beside the database (newest seven kept, plus "Back up now"), and a
+  Settings page that opens either folder in your file manager, exports the graph as the Markdown folder
+  Logseq 0.x reads, and imports such a folder back.
 
 ## Status
 
 Built for one person's daily use, and honest about it: Linux is where it is developed and tested; Windows
 builds in CI. There is no sync, no plugin host, and no Markdown mirror — the database is canonical. Backup
-and export exist so that staying put is a choice rather than a trap.
+and export exist so that staying put is a choice rather than a trap; import covers Logseq 0.x folders, not
+Logseq 2's triple-store database (yet).
 
 ## Downloading a build
 

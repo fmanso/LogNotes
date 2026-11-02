@@ -834,6 +834,108 @@ pub fn run() -> ! {
         format!("heading={shown:?} expected {heading:?}"),
     );
 
+    // ---- the settings page: what it shows, and the three things it does ----------------------
+    driver::click_named(&QString::from("settingsButton"), 0);
+    driver::settle();
+    shot("30-settings");
+    check(
+        "the gear opens the settings page",
+        driver::visible(&QString::from("settingsPage")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+
+    let data_path = driver::journal_property(&QString::from("data_path")).to_string();
+    check(
+        "it names the database file",
+        data_path.ends_with("lognotes.db") && !data_path.is_empty(),
+        data_path.clone(),
+    );
+    let backup_path = driver::journal_property(&QString::from("backup_path")).to_string();
+    check(
+        "it names the backups folder",
+        backup_path.ends_with("backups"),
+        backup_path.clone(),
+    );
+
+    // The day's copy was written as the store opened; "Back up now" adds one beside it.
+    let count_backups = || {
+        driver::journal_property(&QString::from("backups"))
+            .to_string()
+            .matches("\"name\"")
+            .count()
+    };
+    let before_backup = count_backups();
+    driver::click_named(&QString::from("backupNow"), 0);
+    wait_until(|| count_backups() > before_backup);
+    check(
+        "back up now writes a copy and lists it",
+        count_backups() > before_backup,
+        format!("before={before_backup} after={}", count_backups()),
+    );
+
+    // The folder picker cannot be driven headlessly, so the invokable it calls once it returns is
+    // driven directly: everything after the dialog is the real path.
+    let export_dir = root.join("exported");
+    let note = || driver::journal_property(&QString::from("note")).to_string();
+    driver::call_journal(
+        &QString::from("export_to"),
+        &QString::from(export_dir.to_string_lossy().as_ref()),
+    );
+    // Wait for the export's own note, not the backup one still in the property.
+    wait_until(|| note().starts_with("Exported") || note().starts_with("could not"));
+    // A day file with bullets in it, and one file per page.
+    let markdown_in = |folder: &str| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(export_dir.join(folder))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let days = markdown_in("journals");
+    let wrote_a_day = days.iter().any(|path| {
+        std::fs::read_to_string(path).is_ok_and(|text| text.starts_with("- "))
+    });
+    let day_file = wrote_a_day.then(|| days[0].clone());
+    shot("31-exported");
+    check(
+        "export writes bullets into journals/ and a file per page",
+        day_file.is_some() && !markdown_in("pages").is_empty(),
+        format!("note={:?} days={} pages={}", note(), days.len(), markdown_in("pages").len()),
+    );
+
+    // Import: a small Logseq folder, written by hand the way Logseq writes one.
+    let logseq = root.join("logseq-in");
+    std::fs::create_dir_all(logseq.join("journals")).expect("the import folder");
+    std::fs::write(
+        logseq.join("journals").join("2026_11_05.md"),
+        "- TODO imported from logseq\n  SCHEDULED: <2026-11-09>\n  id:: 65f01234\n  - a child\n",
+    )
+    .expect("an imported day");
+    driver::call_journal(
+        &QString::from("import_from"),
+        &QString::from(logseq.to_string_lossy().as_ref()),
+    );
+    wait_until(|| note().starts_with("Imported"));
+    let imported = lognotes_core::Store::open(&root.join("lognotes.db"))
+        .expect("the store")
+        .day("2026-11-05")
+        .expect("the imported day")
+        .blocks;
+    check(
+        "import brings a logseq day in, with its marker, schedule and child",
+        imported.len() == 2
+            && imported[0].content == "imported from logseq"
+            && imported[0].marker == Some(lognotes_core::Marker::Todo)
+            && imported[0].scheduled_date.as_deref() == Some("2026-11-09")
+            && imported[1].depth == 1,
+        format!("{imported:?}"),
+    );
+    shot("32-imported");
+
     // Back to the journal for the close test.
     driver::click_named(&QString::from("journalButton"), 0);
     driver::settle();

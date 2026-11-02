@@ -225,11 +225,29 @@ bridge's business, not this crate's.
 file whose version is **newer** than the binary supports is refused with an error rather than opened —
 better a clear refusal than a silently damaged graph. Opened files run `PRAGMA foreign_keys = ON` and WAL.
 
+## Export and import
+
+`export_markdown(store, directory)` and `import_markdown(store, directory)` move a whole graph through the
+folder of Markdown Logseq 0.x writes: `pages/<name>.md` and `journals/YYYY_MM_DD.md`, one bullet per block,
+two spaces per level, the marker after the dash, and `SCHEDULED: <date>` on its own indented line. The point
+is that the notes stay readable without this app, so the writer emits the shape Logseq reads and the reader
+accepts the shapes a real Logseq folder holds: tabs or spaces at any step, `id::`/`collapsed::` properties
+(ignored), single-colon `DEADLINE:` lines (ignored), multi-line blocks whose continuation lines keep their
+own indentation, and the extra markers (`LATER`, `NOW`, `WAITING`, `CANCELED`) mapped onto the three this
+app keeps.
+
+Import places a bullet beside the nearest shallower block and then indents it once, which is the same
+`indent` the editor uses, so nesting arrives by the one code path that can produce it. A page name is
+escaped into a file name (`/` → `%2F`, `:` → `%3A`).
+
+The round trip is tested as one test rather than as two halves: a graph with a marker, a schedule, a nested
+child, a link and a four-line code block is exported, imported into an empty store, and compared.
+
 ## Errors
 
 One typed error enum — `NotFound`, `InvalidPosition` (no key fits between the neighbours), `BadOffset`
-(not on a character boundary), `BadDate`, `BadPageName`, `SchemaTooNew`, `Storage` (wrapped sqlite error). No panic on any
-input the bridge can pass. Every variant carries enough context to name the offending page or block in a
+(not on a character boundary), `BadDate`, `BadPageName`, `SchemaTooNew`, `Storage` (wrapped sqlite error),
+`Backup` (a copy or an export could not be written). No panic on any input the bridge can pass. Every variant carries enough context to name the offending page or block in a
 UI message.
 
 Dates are validated by round-trip, not by `parse` alone: chrono accepts `2026-4-3`, and a store that

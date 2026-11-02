@@ -1,6 +1,7 @@
 #include <lognotes-qt/driver_shim.h>
 
 #include <QAbstractItemModel>
+#include <QMetaObject>
 #include <QDebug>
 #include <QCoreApplication>
 #include <QList>
@@ -447,6 +448,16 @@ bool lognotes_window_visible() {
 bool lognotes_journal_ready() {
     auto* model = journal_model();
     return model && model->property("ready").toBool();
+}
+
+bool lognotes_call_journal(const QString& method, const QString& argument) {
+    auto* model = journal_model();
+    if (!model) {
+        return false;
+    }
+    return QMetaObject::invokeMethod(model,
+                                     method.toUtf8().constData(),
+                                     Q_ARG(QString, argument));
 }
 
 int lognotes_row_count() {

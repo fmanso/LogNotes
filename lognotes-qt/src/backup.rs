@@ -34,6 +34,18 @@ pub fn daily(store: &Store, database: &Path, today: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Write a copy now, named with the time so it does not collide with the day's automatic copy.
+pub fn now(store: &Store, database: &Path) -> Option<PathBuf> {
+    let dir = directory(database);
+    fs::create_dir_all(&dir).ok()?;
+
+    let stamp = chrono::Local::now().format("%Y-%m-%dT%H%M%S").to_string();
+    let path = dir.join(format!("lognotes-{stamp}.db"));
+    store.backup_into(&path).ok()?;
+    prune(&dir);
+    Some(path)
+}
+
 /// The copies there are, oldest first.
 pub fn copies(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -88,6 +100,28 @@ mod tests {
         assert_eq!(copies(&dir.join("backups")).len(), 1);
         // The copy is a database in its own right.
         assert!(Store::open(&first).is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manual_copy_sits_beside_the_daily_one() {
+        let dir = temp_dir("lognotes-backup-manual");
+        let database = dir.join("lognotes.db");
+        let mut store = Store::open(&database).expect("a store");
+        store.ensure_page("Something").expect("a page");
+
+        daily(&store, &database, "2026-11-02").expect("a daily copy");
+        let manual = now(&store, &database).expect("a copy now");
+
+        let names: Vec<String> = copies(&dir.join("backups"))
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        // The day's copy still sorts first, and the manual one is not mistaken for another day.
+        assert_eq!(names[0], "lognotes-2026-11-02.db");
+        assert!(manual.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -299,6 +299,29 @@ with the command's effect and never types markdown into the block, and each comm
   one is scaled down, and a very tall one is capped. A fence that does not parse keeps its code and adds
   one muted line, produced only after the typing pause so half-typed diagrams do not flicker.
 
+## The settings page
+
+A word ("Settings") in the bar opens a page over the column, the way the results view does — a place you go
+and come back from, not a dialog. It shows the database path and the backups folder (both a path to read and
+a `file://` URL to hand to the system file manager), the backups there are with their sizes, "Back up now",
+and Import/Export.
+
+Nothing on it goes through the row pipeline: these are not block edits, so they are a separate `Job` that
+answers with a note (`Copied to …`, `Exported 3 pages and 12 days to …`, `could not export: …`) and the
+refreshed backup list. An import is the exception — it changes the notes, so it also delivers a fresh
+snapshot and the column shows the imported pages without a restart.
+
+A failed export/import must not blank the app: its error goes into the note line, not into `error`, which
+puts the error card over the column and says the notes could not be opened.
+
+The export folder is chosen with Qt's `FolderDialog`, which cannot be driven headlessly — so the live test
+calls the invokable the dialog would call, and everything after the dialog is the real path. Before an
+export replaces anything, `folder_has_notes` is asked, and a confirmed export is a second, explicit step: an
+export is meant to be the safe copy, so it never overwrites notes without being asked.
+
+`⚙` is not used for the button: the gear resolves to the colour emoji font on this system and is drawn in
+its blue, so the button is a word, matching "Journal" beside it.
+
 ## Failure
 
 `start()` sets `error` and leaves `ready` false when the store refuses to open; QML then shows the error

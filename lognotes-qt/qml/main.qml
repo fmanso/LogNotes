@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Window
+import QtQuick.Dialogs
 import com.lognotes.app 1.0
 
 ApplicationWindow {
@@ -59,6 +60,40 @@ ApplicationWindow {
     // The theme the store remembered, or light until it says otherwise.
     property bool darkTheme: journal.theme === "dark"
 
+    // The settings page covers the column, the way the results view does — it is a place you go to and
+    // come back from, not a dialog over the notes.
+    property bool settingsOpen: false
+    // The folder a confirmed export would write into.
+    property string pendingExport: ""
+
+    function openSettings() {
+        root.settingsOpen = true
+        journal.open_settings()
+    }
+
+    function closeSettings() {
+        root.settingsOpen = false
+        list.forceActiveFocus()
+    }
+
+    // A selected folder as a plain path: Qt hands it over as a file:// URL.
+    function localPath(url) {
+        const text = url.toString()
+        const bare = text.startsWith("file://") ? text.slice(7) : text
+        return decodeURIComponent(bare)
+    }
+
+    function sizeText(bytes) {
+        if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB"
+        if (bytes >= 1024) return Math.round(bytes / 1024) + " KB"
+        return bytes + " B"
+    }
+
+    // `lognotes-2026-11-02.db` reads as a date; a manual copy adds the time.
+    function backupLabel(name) {
+        return name.replace(/^lognotes-/, "").replace(/\.db$/, "").replace("T", " ")
+    }
+
     // The quick switcher: one field over the whole graph. `searchHits` is rebuilt from the model's JSON
     // answer, and `searchMessage` is empty unless there is something to say.
     property int searchSelected: -1
@@ -106,6 +141,7 @@ ApplicationWindow {
     }
 
     function goJournal() {
+        root.settingsOpen = false
         root.closeSlash()
         root.pendingTerm = ""
         searchField.focus = false
@@ -1008,6 +1044,14 @@ ApplicationWindow {
                 objectName: "sidebarButton"
                 text: root.sidebarOpen ? qsTr("\u2039") : qsTr("\u203a")
                 onClicked: root.sidebarOpen = !root.sidebarOpen
+            }
+
+            // A word, not a gear: the gear glyph comes from the colour emoji font here, so it would be
+            // drawn in someone else's blue. "Journal" beside it is a word too.
+            QuietButton {
+                objectName: "settingsButton"
+                text: qsTr("Settings")
+                onClicked: root.openSettings()
             }
 
             QuietButton {
@@ -1962,5 +2006,255 @@ ApplicationWindow {
         anchors.margins: 12
         text: journal.error
         color: theme.dangerText
+    }
+
+    // ---- the settings page ----------------------------------------------------------------
+    Rectangle {
+        id: settingsPage
+        objectName: "settingsPage"
+        anchors.top: topBar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: root.sidebarOpen ? sidebar.right : parent.left
+        anchors.right: parent.right
+        color: theme.page
+        visible: root.settingsOpen
+        focus: root.settingsOpen
+
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Escape) {
+                root.closeSettings()
+                event.accepted = true
+            }
+        }
+
+        Flickable {
+            anchors.fill: parent
+            anchors.margins: 28
+            contentHeight: settingsColumn.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+                id: settingsColumn
+                width: parent.width
+                spacing: 18
+
+                Label {
+                    text: qsTr("Settings")
+                    color: theme.text
+                    font.pixelSize: 22
+                    font.bold: true
+                }
+
+                // ---- where everything is
+                Column {
+                    width: parent.width
+                    spacing: 8
+
+                    Label {
+                        text: qsTr("DATA")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 12
+
+                        Label {
+                            width: parent.width - 140
+                            text: journal.data_path
+                            color: theme.text
+                            font.pixelSize: 13
+                            elide: Text.ElideMiddle
+                        }
+
+                        QuietButton {
+                            objectName: "openDataFolder"
+                            text: qsTr("Open folder")
+                            onClicked: Qt.openUrlExternally(journal.data_folder)
+                        }
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: theme.rule }
+
+                // ---- the backups
+                Column {
+                    width: parent.width
+                    spacing: 8
+
+                    Label {
+                        text: qsTr("BACKUPS")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 12
+
+                        Label {
+                            width: parent.width - 240
+                            text: journal.backup_path
+                            color: theme.text
+                            font.pixelSize: 13
+                            elide: Text.ElideMiddle
+                        }
+
+                        QuietButton {
+                            objectName: "openBackupFolder"
+                            text: qsTr("Open folder")
+                            onClicked: Qt.openUrlExternally(journal.backup_folder)
+                        }
+
+                        QuietButton {
+                            objectName: "backupNow"
+                            text: qsTr("Back up now")
+                            onClicked: journal.back_up_now()
+                        }
+                    }
+
+                    Label {
+                        visible: backupList.count === 0
+                        text: qsTr("No backups yet — one is written each time the notes are opened.")
+                        color: theme.textFaint
+                        font.pixelSize: 12
+                    }
+
+                    Repeater {
+                        id: backupList
+                        model: JSON.parse(journal.backups === "" ? "[]" : journal.backups)
+
+                        Row {
+                            width: settingsColumn.width
+                            spacing: 12
+
+                            Label {
+                                text: root.backupLabel(modelData.name)
+                                color: theme.textMuted
+                                font.pixelSize: 12
+                            }
+
+                            Label {
+                                text: root.sizeText(modelData.bytes)
+                                color: theme.textGhost
+                                font.pixelSize: 12
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: theme.rule }
+
+                // ---- moving the notes in and out
+                Column {
+                    width: parent.width
+                    spacing: 10
+
+                    Label {
+                        text: qsTr("MOVE NOTES")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+
+                    Label {
+                        width: parent.width
+                        text: qsTr("Export writes every page and day as Markdown, in the folders Logseq reads. Import reads such a folder back in.")
+                        color: theme.textFaint
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Row {
+                        spacing: 12
+
+                        QuietButton {
+                            objectName: "exportButton"
+                            text: qsTr("Export to a folder…")
+                            onClicked: exportFolder.open()
+                        }
+
+                        QuietButton {
+                            objectName: "importButton"
+                            text: qsTr("Import from a folder…")
+                            onClicked: importFolder.open()
+                        }
+                    }
+
+                    Label {
+                        objectName: "settingsNote"
+                        width: parent.width
+                        visible: text !== ""
+                        text: journal.note
+                        color: journal.note.startsWith("could not") ? theme.dangerText : theme.textMuted
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+        }
+    }
+
+    FolderDialog {
+        id: exportFolder
+        title: qsTr("Export notes into…")
+        onAccepted: {
+            const dir = root.localPath(selectedFolder)
+            // An export is meant to be the safe copy, so it never replaces notes without being asked.
+            if (journal.folder_has_notes(dir)) {
+                root.pendingExport = dir
+                confirmReplace.open()
+            } else {
+                journal.export_to(dir)
+            }
+        }
+    }
+
+    FolderDialog {
+        id: importFolder
+        title: qsTr("Import a Logseq folder…")
+        onAccepted: journal.import_from(root.localPath(selectedFolder))
+    }
+
+    Dialog {
+        id: confirmReplace
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("Replace notes in that folder?")
+
+        contentItem: Label {
+            width: 360
+            text: qsTr("That folder already holds notes with the same kind of names. Exporting will replace them.")
+            color: theme.text
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "cancelExport"
+                text: qsTr("Cancel")
+                onClicked: confirmReplace.close()
+            }
+
+            QuietButton {
+                objectName: "confirmExport"
+                text: qsTr("Export anyway")
+                onClicked: {
+                    confirmReplace.close()
+                    journal.export_to(root.pendingExport)
+                }
+            }
+        }
     }
 }

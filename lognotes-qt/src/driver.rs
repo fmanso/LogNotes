@@ -63,6 +63,8 @@ mod ffi {
         fn lognotes_window_visible() -> bool;
         #[rust_name = "journal_ready"]
         fn lognotes_journal_ready() -> bool;
+        #[rust_name = "call_journal"]
+        fn lognotes_call_journal(method: &QString, argument: &QString) -> bool;
     }
 }
 

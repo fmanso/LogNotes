@@ -6,14 +6,14 @@
 //! view cannot reach the database even by accident.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
-use cxx_qt_lib::{QByteArray, QModelIndex, QString, QVariant};
+use cxx_qt_lib::{QByteArray, QModelIndex, QString, QUrl, QVariant};
 use lognotes_core::markdown::{self, LinkKind};
 use lognotes_core::{
     AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, SearchResults, Store,
@@ -124,6 +124,15 @@ pub mod qobject {
         #[qproperty(QString, sidebar)]
         #[qproperty(bool, page_favourite)]
         #[qproperty(i32, focus_row)]
+        /// What the settings page did last: "Copied to …", "Exported 3 pages…", or why it could not.
+        #[qproperty(QString, note)]
+        /// The backups there are, newest first, as `[{"name": "…", "bytes": 1234}]`.
+        #[qproperty(QString, backups)]
+        /// Where the notes live, and the folder holding it — shown and opened from the settings page.
+        #[qproperty(QString, data_path)]
+        #[qproperty(QString, backup_path)]
+        #[qproperty(QString, data_folder)]
+        #[qproperty(QString, backup_folder)]
         type Journal = super::JournalRust;
 
         #[cxx_override]
@@ -144,6 +153,26 @@ pub mod qobject {
         /// Append the previous chunk of journal days.
         #[qinvokable]
         fn load_more(self: Pin<&mut Self>);
+
+        /// Fill the settings page: where everything is, and which backups exist.
+        #[qinvokable]
+        fn open_settings(self: Pin<&mut Self>);
+
+        /// Write a backup now, in addition to the daily one.
+        #[qinvokable]
+        fn back_up_now(self: Pin<&mut Self>);
+
+        /// Write every page and day as Markdown under `directory`.
+        #[qinvokable]
+        fn export_to(self: Pin<&mut Self>, directory: &QString);
+
+        /// Read a Logseq 0.x folder — `journals/` and `pages/` — into the notes.
+        #[qinvokable]
+        fn import_from(self: Pin<&mut Self>, directory: &QString);
+
+        /// Whether exporting into `directory` would replace notes that are already there.
+        #[qinvokable]
+        fn folder_has_notes(self: Pin<&mut Self>, directory: &QString) -> bool;
 
         /// Persist the text of a block (or materialise a day's placeholder block).
         #[qinvokable]
@@ -361,6 +390,14 @@ pub struct JournalRust {
     pending_focus: i32,
     /// The row the view should put the caret in, or -1.
     focus_row: i32,
+    /// What the settings page did last, and the backups it lists.
+    note: QString,
+    backups: QString,
+    /// The database file, its folder, and the backups folder — as text and as `file://` URLs.
+    data_path: QString,
+    backup_path: QString,
+    data_folder: QString,
+    backup_folder: QString,
 }
 
 /// Where a block that does not exist yet has to be created: a journal day, or a named page.
@@ -412,6 +449,15 @@ fn parse_marker(raw: &str) -> Option<Marker> {
     }
 }
 
+/// What the settings page asked for. None of these are row edits, so they answer with a note instead of a
+/// fresh snapshot — except an import, which changes the notes and so reloads the column too.
+enum SettingsAction {
+    Refresh,
+    BackUp,
+    Export(String),
+    Import(String),
+}
+
 enum Job {
     /// The quick switcher's query: no snapshot, just an answer.
     Search { query: String, queue: CxxQtThread<Journal> },
@@ -423,6 +469,14 @@ enum Job {
     /// Run an optional command, then hand back a fresh snapshot of `dates`.
     Run {
         command: Option<Command>,
+        dates: Vec<String>,
+        mode: Mode,
+        queue: CxxQtThread<Journal>,
+    },
+    /// Something the settings page asked for; `dates` and `mode` are only used by an import, which
+    /// reloads the column afterwards.
+    Settings {
+        action: SettingsAction,
         dates: Vec<String>,
         mode: Mode,
         queue: CxxQtThread<Journal>,
@@ -554,6 +608,7 @@ impl qobject::Journal {
     }
 
     fn start(mut self: Pin<&mut Self>) {
+        self.as_mut().fill_paths();
         let dates = if self.dates.is_empty() {
             let dates = today_chunk(CHUNK_DAYS);
             self.as_mut().rust_mut().dates = dates.clone();
@@ -571,6 +626,65 @@ impl qobject::Journal {
         let queue = self.as_mut().qt_thread();
         let mode = self.mode.clone();
         self.send(Job::Start { dates, mode, queue });
+    }
+
+    /// Where the notes and the backups are, in the two spellings the page needs: a path to show and a URL
+    /// to open. Both are fixed for the life of the process.
+    fn fill_paths(mut self: Pin<&mut Self>) {
+        let Some(database) = DATABASE_PATH.get() else {
+            return;
+        };
+        let backups = crate::backup::directory(database);
+        let data_folder = database.parent().unwrap_or(Path::new("."));
+
+        self.as_mut()
+            .set_data_path(QString::from(database.to_string_lossy().as_ref()));
+        self.as_mut()
+            .set_data_folder(url_of(data_folder));
+        self.as_mut()
+            .set_backup_path(QString::from(backups.to_string_lossy().as_ref()));
+        self.as_mut().set_backup_folder(url_of(&backups));
+    }
+
+    fn send_settings(mut self: Pin<&mut Self>, action: SettingsAction) -> bool {
+        let queue = self.as_mut().qt_thread();
+        self.send(Job::Settings {
+            action,
+            dates: self.dates.clone(),
+            mode: self.mode.clone(),
+            queue,
+        })
+    }
+
+    fn open_settings(mut self: Pin<&mut Self>) {
+        self.as_mut().fill_paths();
+        self.as_mut().send_settings(SettingsAction::Refresh);
+    }
+
+    fn back_up_now(mut self: Pin<&mut Self>) {
+        self.as_mut().send_settings(SettingsAction::BackUp);
+    }
+
+    fn export_to(mut self: Pin<&mut Self>, directory: &QString) {
+        self.as_mut()
+            .send_settings(SettingsAction::Export(directory.to_string()));
+    }
+
+    fn import_from(mut self: Pin<&mut Self>, directory: &QString) {
+        self.as_mut()
+            .send_settings(SettingsAction::Import(directory.to_string()));
+    }
+
+    fn folder_has_notes(mut self: Pin<&mut Self>, directory: &QString) -> bool {
+        // Only the two folders an export writes into can be replaced by one.
+        ["pages", "journals"].iter().any(|folder| {
+            let dir = Path::new(&directory.to_string()).join(folder);
+            std::fs::read_dir(dir).is_ok_and(|entries| {
+                entries.filter_map(|entry| entry.ok()).any(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "md")
+                })
+            })
+        })
     }
 
     fn load_more(mut self: Pin<&mut Self>) {
@@ -851,6 +965,12 @@ impl qobject::Journal {
     }
 
     /// Called on the GUI thread when a search answer arrives.
+    /// Answer the settings page: what happened, and the backups there are now.
+    fn apply_settings(mut self: Pin<&mut Self>, note: String, backups: String) {
+        self.as_mut().set_note(QString::from(note.as_str()));
+        self.as_mut().set_backups(QString::from(backups.as_str()));
+    }
+
     fn apply_search(mut self: Pin<&mut Self>, json: String) {
         self.as_mut().set_hits(QString::from(json.as_str()));
     }
@@ -1023,6 +1143,59 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 };
                 let _ = queue.queue(move |journal: Pin<&mut Journal>| journal.apply_search(json));
             }
+            Job::Settings {
+                action,
+                dates,
+                mode,
+                queue,
+            } => {
+                let Some(store) = store.as_mut() else {
+                    continue;
+                };
+                let (note, reload) = match action {
+                    SettingsAction::Refresh => (String::new(), false),
+                    SettingsAction::BackUp => {
+                        let copied = DATABASE_PATH
+                            .get()
+                            .and_then(|database| crate::backup::now(store, database));
+                        let note = match copied {
+                            Some(path) => (format!("Copied to {}", path.display())),
+                            None => ("could not write a backup".to_string()),
+                        };
+                        (note, false)
+                    }
+                    SettingsAction::Export(directory) => {
+                        let note = match lognotes_core::export_markdown(store, Path::new(&directory)) {
+                            Ok(moved) => (format!(
+                                "Exported {} pages and {} days to {directory}",
+                                moved.pages, moved.days
+                            )),
+                            Err(error) => format!("could not export: {error}"),
+                        };
+                        (note, false)
+                    }
+                    SettingsAction::Import(directory) => {
+                        let note = match lognotes_core::import_markdown(store, Path::new(&directory)) {
+                            Ok(moved) => (format!(
+                                "Imported {} pages and {} days from {directory}",
+                                moved.pages, moved.days
+                            )),
+                            Err(error) => format!("could not import: {error}"),
+                        };
+                        // Imported notes are notes: show them without asking for a restart.
+                        (note, true)
+                    }
+                };
+                let backups = backups_json();
+                let _ = queue.clone().queue(move |journal: Pin<&mut Journal>| {
+                    journal.apply_settings(note, backups)
+                });
+                if reload {
+                    let theme = theme_name(store);
+                    let outcome = snapshot(store, &dates, &mode, &mut diagrams, &theme);
+                    deliver(queue, outcome);
+                }
+            }
             Job::Flush { command, done } => {
                 if let Some(store) = store.as_mut() {
                     let _ = run_command(store, command);
@@ -1067,6 +1240,39 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
             }
         }
     }
+}
+
+/// A folder as a `file://` URL, so QML can hand it to the system's file manager.
+fn url_of(path: &Path) -> QString {
+    QString::from(
+        QUrl::from_local_file(&QString::from(path.to_string_lossy().as_ref()))
+            .to_string()
+            .to_string()
+            .as_str(),
+    )
+}
+
+/// The backups there are, newest first, as `[{"name": "…", "bytes": 1234}]`.
+fn backups_json() -> String {
+    let copies = DATABASE_PATH
+        .get()
+        .map(|database| crate::backup::copies(&crate::backup::directory(database)))
+        .unwrap_or_default();
+
+    let mut out = String::from("[");
+    for (index, path) in copies.iter().rev().enumerate() {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if index > 0 {
+            out.push(',');
+        }
+        // The names are generated here — a date and an extension — so there is nothing to escape.
+        out.push_str(&format!("{{\"name\": \"{name}\", \"bytes\": {bytes}}}"));
+    }
+    out.push(']');
+    out
 }
 
 fn deliver(queue: CxxQtThread<Journal>, outcome: Outcome) {

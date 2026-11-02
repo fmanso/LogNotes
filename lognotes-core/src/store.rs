@@ -579,6 +579,19 @@ impl Store {
         })
     }
 
+    /// Every journal day that was ever written, oldest first — what an export walks.
+    pub fn journal_pages(&self) -> Result<Vec<Page>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, name_key, kind, journal_date FROM page
+             WHERE kind = 'journal'
+             ORDER BY journal_date",
+        )?;
+        let pages = stmt
+            .query_map([], read_page)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pages)
+    }
+
     /// Star or unstar a page. Outside the undo history: a note's text is what undo walks, and a star is
     /// not an edit to the note.
     pub fn set_favourite(&mut self, page_id: i64, favourite: bool) -> Result<()> {
