@@ -120,6 +120,8 @@ pub struct BlockHit {
     pub journal_date: Option<String>,
     /// A window of the block's text around the match, as stored — marks and all. The view renders it.
     pub snippet: String,
+    /// Where the match sits inside the snippet, in bytes, so the view can highlight what matched.
+    pub matched: Option<(usize, usize)>,
 }
 
 /// What the quick switcher found: pages by name first, then blocks by their text.
@@ -127,6 +129,8 @@ pub struct BlockHit {
 pub struct SearchResults {
     pub pages: Vec<Page>,
     pub blocks: Vec<BlockHit>,
+    /// How many matches there are in all, before the caps — what an "all results" count is made of.
+    pub total: usize,
 }
 
 /// A journal day as the column renders it. `page_id` is `None` when the day has never been written to —

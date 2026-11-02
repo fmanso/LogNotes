@@ -231,7 +231,7 @@ pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
 /// Every character of the note is escaped, so a block that contains markup shows that markup instead of
 /// becoming it.
 pub fn to_html(text: &str) -> String {
-    render(text, false, None)
+    render(text, false, None, None)
 }
 
 /// The colours a rendered fence uses. Passed in rather than owned here: this module knows what a token
@@ -247,17 +247,24 @@ pub struct CodeColours<'a> {
 /// The same rendering for a block that is not being edited: line breaks are kept, so a fence stays a
 /// block of code instead of collapsing into one line, and a fence whose language is known is coloured.
 pub fn to_html_block(text: &str, colours: &CodeColours) -> String {
-    render(text, true, Some(colours))
+    render(text, true, Some(colours), None)
 }
 
-fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>) -> String {
+/// The same rendering with one range picked out behind it — what a search result shows so you can see
+/// why it matched. The range is marked where the text is escaped, not by cutting the string first: a
+/// match inside a `[[link]]` must not split it into two unclosed halves.
+pub fn to_html_marked(text: &str, mark: (usize, usize)) -> String {
+    render(text, false, None, Some(mark))
+}
+
+fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>, mark: Option<(usize, usize)>) -> String {
     let scan = scan(text);
     let mut html = String::new();
     let mut cursor = 0;
 
     for span in &scan.spans {
         if span.start > cursor {
-            escape_into(&mut html, &text[cursor..span.start], keep_lines);
+            escape_into_marked(&mut html, &text[cursor..span.start], keep_lines, cursor, mark);
         }
         if !span.style.contains(Style::DIM) {
             let href = scan
@@ -270,7 +277,13 @@ fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>) -> String
                 (Some(language), Some(colours)) => {
                     write_code(&mut html, &text[span.start..span.end], language, colours)
                 }
-                _ => escape_into(&mut html, &text[span.start..span.end], keep_lines),
+                _ => escape_into_marked(
+                    &mut html,
+                    &text[span.start..span.end],
+                    keep_lines,
+                    span.start,
+                    mark,
+                ),
             }
             close_tags(&mut html, span.style);
         }
@@ -278,7 +291,7 @@ fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>) -> String
     }
 
     if cursor < text.len() {
-        escape_into(&mut html, &text[cursor..], keep_lines);
+        escape_into_marked(&mut html, &text[cursor..], keep_lines, cursor, mark);
     }
 
     if keep_lines {
@@ -380,6 +393,31 @@ fn close_tags(html: &mut String, style: Style) {
 }
 
 /// A newline becomes a space in a summary row, and a line break in a block at rest.
+/// `escape_into`, with `mark` — a range in the *whole* text — picked out behind itself where it falls
+/// inside `text`, which starts at `offset`.
+fn escape_into_marked(
+    html: &mut String,
+    text: &str,
+    keep_lines: bool,
+    offset: usize,
+    mark: Option<(usize, usize)>,
+) {
+    let Some((start, end)) = mark else {
+        return escape_into(html, text, keep_lines);
+    };
+    let from = start.max(offset);
+    let to = end.min(offset + text.len());
+    if from >= to {
+        return escape_into(html, text, keep_lines);
+    }
+
+    escape_into(html, &text[..from - offset], keep_lines);
+    html.push_str("<span style=\"background-color:#f3e6c8\">");
+    escape_into(html, &text[from - offset..to - offset], keep_lines);
+    html.push_str("</span>");
+    escape_into(html, &text[to - offset..], keep_lines);
+}
+
 fn escape_into(html: &mut String, text: &str, keep_lines: bool) {
     for character in text.chars() {
         match character {
@@ -1018,6 +1056,19 @@ mod tests {
 
         assert!(html.contains("&lt;script"), "not escaped: {html}");
         assert!(!html.contains("<script>"), "raw markup leaked: {html}");
+    }
+
+    #[test]
+    fn a_marked_range_is_picked_out_without_breaking_the_markup() {
+        // The match sits inside a link: cutting the string first would leave "[[", "]]" unpaired and the
+        // link would not be a link.
+        let html = to_html_marked("see [[My Project]] now", (6, 16));
+
+        assert!(html.contains("<a href=\"page:My Project\">"), "link broke: {html}");
+        assert!(
+            html.contains("<span style=\"background-color:#f3e6c8\">My Project</span>"),
+            "mark missing: {html}"
+        );
     }
 
     #[test]

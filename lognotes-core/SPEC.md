@@ -138,7 +138,7 @@ cursor is worse than one that lingers.
 | `recent_pages(limit)` | Named pages ordered by `visit_order`, newest first — the sidebar's Recent. Ordering is exact because it is a counter, not a timestamp. |
 | `is_favourite(page)` | Whether a page is starred, for the star in its header. |
 | `setting(key)` / `set_setting(key, value)` | The app's own settings, `theme` today. A missing key is `None`, not an error. |
-| `search(query, page_limit, block_limit)` | `SearchResults`: pages and written days whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date and a window of its text around the match. |
+| `search(query, page_limit, block_limit)` | `SearchResults`: pages and written days whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date, a window of its text around the match, and where inside that window the match sits; `total` counts every match, not only the capped ones. |
 | `page_of_block(block)` | The page a block belongs to — what the view needs to show a block a search found. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
@@ -276,6 +276,11 @@ The sidebar and the settings have their own file too: a page starred and unstarr
 by name with journals excluded, recents ordered newest-first and a re-opened page moving back to the top,
 the cap, a journal day never counted as a recent page, a setting written and read back, and the check
 that starring and visiting leave undo untouched.
+
+`to_html_marked` renders a block like `to_html` with one byte range picked out behind it. The mark is applied
+where the text is escaped, never by cutting the string first: a match inside a `[[link]]` would otherwise
+split it into two unclosed halves and the link would stop being one. That is what a search result shows so
+you can see why it matched.
 
 `search` has its own file: page ranking (exact, prefix, anywhere, capped, journals excluded), a half-typed
 word already matching block text, a block hit naming the page it lives on, an empty answer for a query that

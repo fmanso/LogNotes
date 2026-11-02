@@ -544,10 +544,12 @@ impl Store {
              LIMIT ?2",
         )?;
         let blocks = stmt
-            .query_map(params![fts_query, block_limit as i64], |row| {
+            .query_map(params![fts_query.clone(), block_limit as i64], |row| {
                 let block = read_block_row(row, 0)?;
+                let (snippet, matched) = snippet(&block.content, &needle);
                 Ok(BlockHit {
-                    snippet: snippet(&block.content, &needle),
+                    snippet,
+                    matched,
                     block,
                     page_name: row.get(7)?,
                     journal_date: row.get(8)?,
@@ -555,7 +557,26 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        Ok(SearchResults { pages, blocks })
+        // The caps decide what is shown, not what exists: an "all results (N)" count needs the latter.
+        let total = {
+            let page_total: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM page WHERE kind = 'page' AND instr(name_key, ?1) > 0",
+                params![needle],
+                |row| row.get(0),
+            )?;
+            let block_total: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM block_fts WHERE block_fts MATCH ?1",
+                params![fts_query],
+                |row| row.get(0),
+            )?;
+            (page_total + block_total) as usize
+        };
+
+        Ok(SearchResults {
+            pages,
+            blocks,
+            total,
+        })
     }
 
     /// Star or unstar a page. Outside the undo history: a note's text is what undo walks, and a star is
@@ -1173,8 +1194,8 @@ fn push_rows(
 }
 
 /// A window of `text` around the first match of `needle`, cut at character boundaries and marked with
-/// ellipses where it was cut.
-fn snippet(text: &str, needle: &str) -> String {
+/// ellipses where it was cut — with the match's own range inside that window.
+fn snippet(text: &str, needle: &str) -> (String, Option<(usize, usize)>) {
     const WINDOW: usize = 60;
 
     let start = text.to_lowercase().find(needle).unwrap_or(0);
@@ -1191,11 +1212,18 @@ fn snippet(text: &str, needle: &str) -> String {
     if from > 0 {
         out.push('…');
     }
-    out.push_str(text[from..to].trim());
+    let lead = out.len();
+    let body = text[from..to].trim();
+    // Trimming the window can move the match: find it again in what is actually shown.
+    let matched = body
+        .to_lowercase()
+        .find(needle)
+        .map(|at| (lead + at, lead + at + needle.len()));
+    out.push_str(body);
     if to < text.len() {
         out.push('…');
     }
-    out
+    (out, matched)
 }
 
 fn read_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {

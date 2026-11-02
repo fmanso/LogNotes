@@ -394,7 +394,8 @@ pub fn run() -> ! {
     // ---- a block at rest renders its markdown ----------------------------------------------
     // Focus another row so this one renders, then read *this* row's HTML.
     let elsewhere = if marked == 0 { 1 } else { 0 };
-    driver::click_block(elsewhere);
+    // Past the text, away from any link in that row: this click only has to move the caret out.
+    driver::click_block_at(elsewhere, 0.98);
     driver::settle();
     shot("19-block-at-rest");
     wait_until(|| !driver::row_html(marked).to_string().is_empty());
@@ -620,6 +621,38 @@ pub fn run() -> ! {
         "a block hit opens that block with the caret on the match",
         blocks(&root).iter().any(|block| block.contains("Qworld")),
         format!("blocks={:?}", blocks(&root)),
+    );
+
+    // ---- the full results view ---------------------------------------------------------------
+    // The preview is capped; Ctrl+Enter in the field asks for everything, in the column area.
+    driver::press_key(key::K, modifier::CTRL);
+    driver::wait_ms(400);
+    driver::type_text(&QString::from("My Project"));
+    driver::settle();
+    driver::press_key(key::RETURN, modifier::CTRL);
+    driver::settle();
+    shot("26a-all-results");
+    check(
+        "ctrl+enter in the field opens the full results",
+        driver::journal_property(&QString::from("view")).to_string() == "search",
+        format!(
+            "view={} rows={}",
+            driver::journal_property(&QString::from("view")).to_string(),
+            driver::row_count()
+        ),
+    );
+    let result_rows = driver::row_count();
+    check(
+        "the results view lists headings and matches",
+        result_rows > 2,
+        format!("rows={result_rows}"),
+    );
+    driver::press_key(key::ESCAPE, modifier::NONE);
+    driver::settle();
+    check(
+        "escape leaves the results and returns to the column",
+        driver::journal_property(&QString::from("view")).to_string() == "journal",
+        format!("view={}", driver::journal_property(&QString::from("view")).to_string()),
     );
 
     // ---- a link in a block at rest opens its page --------------------------------------------

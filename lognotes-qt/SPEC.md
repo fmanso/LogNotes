@@ -235,6 +235,13 @@ with the command's effect and never types markdown into the block, and each comm
   button, a sidebar toggle and the theme toggle; typing in the field opens the results just under it, and
   `Ctrl+K` only puts the caret there. The sidebar lists Favourites then Recent (eight), and the Pages
   popup is gone — one way to reach a page, not two. A page is starred from the star in its own header.
+- **The preview is a preview, and the field can hand over to a full view.** The results panel is an item
+  anchored under the search field — not a `Popup`, whose position in the overlay is computed by hand and
+  which put itself outside the window when the numbers disagreed — clipped and sized to the space below the
+  bar. It lists five pages and twenty blocks; when there are more, its last row reads "All results (N)" and
+  `Ctrl+Enter` opens the same thing from the field. That view is a *mode*, like a page: every match as column
+  rows, Pages then Blocks, each block with what matched picked out behind it, and `Esc` returns to the
+  journal.
 - **A search term belongs to the hit that carried it.** It is captured when a hit is activated and
   consumed by the block that hit names; every other navigation forgets it. Left behind, it moved the
   caret to where that word happened to sit in a *later* block — which is how a reference click put the
@@ -244,7 +251,11 @@ with the command's effect and never types markdown into the block, and each comm
   (`Qt.callLater`) and the delegate that was destroyed reports its blur while the flag is still set.
   The search field hands focus back when a hit is activated — leaving it there meant the next keystroke
   landed in the search box instead of the page that had just opened.
-- **`Ctrl+K` and `Ctrl+B`: the shortcut acts, the delegate consumes.** A window `Shortcut` runs before the
+- **`Ctrl+K` and `Ctrl+B` are handled in the delegate, not by a window shortcut.** A window shortcut runs
+  before the focused item but does not consume the key, so a delegate that acted as well fired twice, and one
+  that only consumed depended on the shortcut having been delivered — which it is not when the window is not
+  active. The delegate does the work and takes the key; `TextEdit` would otherwise bind them to
+  delete-to-end-of-line and bold. A window `Shortcut` runs before the
   focused item sees the key but does not consume it, and `TextEdit` binds the same keys to
   delete-to-end-of-line and bold — so a delegate that *acted* as well toggled twice, and one that did
   nothing let the editor eat the key. The delegate now accepts the key without acting: one action, and

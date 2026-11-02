@@ -63,6 +63,7 @@ ApplicationWindow {
     // answer, and `searchMessage` is empty unless there is something to say.
     property int searchSelected: -1
     property string searchMessage: ""
+    property bool searchOpen: false
     // Where the block hits start, so the list can label its two groups.
     property int searchFirstBlock: -1
 
@@ -190,16 +191,27 @@ ApplicationWindow {
         }
 
         function onHitsChanged() {
-            let body = { error: "", hits: [] }
+            let body = { error: "", total: 0, hits: [] }
             try {
                 body = JSON.parse(journal.hits)
             } catch (error) {
-                body = { error: qsTr("The search answer could not be read."), hits: [] }
+                body = { error: qsTr("The search answer could not be read."), total: 0, hits: [] }
             }
 
             searchModel.clear()
             for (const hit of body.hits) {
                 searchModel.append(hit)
+            }
+            // The preview is a preview: when there is more, the last row says so and opens the rest.
+            if (body.total > body.hits.length) {
+                searchModel.append({
+                    "kind": "all",
+                    "title": qsTr("All results (%1)").arg(body.total),
+                    "where": qsTr("ctrl+⏎"),
+                    "blockId": -1,
+                    "page": "",
+                    "date": ""
+                })
             }
             root.searchSelected = searchModel.count > 0 ? 0 : -1
             root.searchFirstBlock = -1
@@ -573,23 +585,22 @@ ApplicationWindow {
     // ---- the quick switcher ------------------------------------------------------------------
     // Ctrl+K over anything: page names first, then blocks whose text matches.
     Shortcut {
-        sequences: ["Ctrl+K"]
-        onActivated: root.focusSearch()
-    }
-
-    Shortcut {
-        sequences: ["Ctrl+B"]
-        onActivated: root.sidebarOpen = !root.sidebarOpen
+        sequence: "Esc"
+        enabled: journal.view === "search"
+        onActivated: journal.back()
     }
 
     // Typing in the bar is what opens the results; Ctrl+K only puts the caret there.
     function focusSearch() {
         root.closeSlash()
         root.editingRow = -1
+        // Nothing is waiting for a block caret while the field has it, or the next snapshot would take
+        // the caret back out of the search box.
+        root.wantsFocus = false
         searchField.forceActiveFocus()
         searchField.selectAll()
         if (searchField.text !== "") {
-            searchPopup.open()
+            root.searchOpen = true
         }
     }
 
@@ -606,7 +617,11 @@ ApplicationWindow {
             return
         }
         const hit = searchModel.get(index)
-        searchPopup.close()
+        if (hit.kind === "all") {
+            root.openAllResults()
+            return
+        }
+        root.searchOpen = false
         // Give the caret back to the content: leaving it in the field meant the next keystroke landed in
         // the search box instead of the page that had just opened.
         root.pendingTerm = searchField.text.trim()
@@ -621,6 +636,17 @@ ApplicationWindow {
     }
 
     // Where a hit lives: a page's name, a day's date, or "today".
+    // Every match, in the column area, for what is typed in the field.
+    function openAllResults() {
+        const query = searchField.text.trim()
+        if (query === "") {
+            return
+        }
+        root.searchOpen = false
+        root.wantsFocus = false
+        journal.open_search(query)
+    }
+
     function searchWhere(hit) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(hit.where)) {
             return hit.where
@@ -635,9 +661,9 @@ ApplicationWindow {
         onTriggered: {
             journal.search(searchField.text)
             if (searchField.text.trim() !== "") {
-                searchPopup.open()
+                root.searchOpen = true
             } else {
-                searchPopup.close()
+                root.searchOpen = false
             }
         }
     }
@@ -891,7 +917,7 @@ ApplicationWindow {
             MonthGrid {
                 id: grid
                 month: datePopup.monthAnchor
-                onClicked: (pickedDay) => datePopup.picked = pickedDay
+                onClicked: (pickedDay) => datePopup.picked = new Date(pickedDay)
             }
 
             Label {
@@ -1023,7 +1049,7 @@ ApplicationWindow {
                 onTextChanged: searchDebounce.restart()
                 onActiveFocusChanged: {
                     if (!activeFocus) {
-                        searchPopup.close()
+                        root.searchOpen = false
                     }
                 }
 
@@ -1035,12 +1061,15 @@ ApplicationWindow {
                         root.searchMove(-1)
                         event.accepted = true
                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                        if (searchPopup.visible) {
+                        if (event.modifiers & Qt.ControlModifier) {
+                            root.openAllResults()
+                            event.accepted = true
+                        } else if (root.searchOpen) {
                             root.searchActivate(root.searchSelected)
                             event.accepted = true
                         }
                     } else if (event.key === Qt.Key_Escape) {
-                        searchPopup.close()
+                        root.searchOpen = false
                         searchField.text = ""
                         event.accepted = true
                     }
@@ -1199,27 +1228,27 @@ ApplicationWindow {
         }
     }
 
-    Popup {
-        id: searchPopup
+    // The results of what is typed in the bar, hanging under the field. Not a Popup: a popup lives in the
+    // overlay and is positioned by hand, which put it outside the window when the numbers did not agree.
+    // Anchored inside the window, clipped, and never focused — the field keeps the caret, and Esc, Enter
+    // and the arrows are handled there.
+    Rectangle {
+        id: searchPanel
         objectName: "searchPopup"
-        parent: Overlay.overlay
-        // Hangs under the field it answers. Not modal and never focused: the field keeps the caret,
-        // and Esc, Enter and the arrows are handled there.
-        x: searchFieldBox.mapToItem(Overlay.overlay, 0, 0).x
+        visible: root.searchOpen
+        z: 20
+        x: searchFieldBox.x
         y: topBar.height + 6
         width: searchFieldBox.width
-        padding: 0
-        modal: false
-        focus: false
-        closePolicy: Popup.NoAutoClose
+        height: Math.min(root.height - y - 12, body.implicitHeight)
+        color: theme.page
+        border.color: theme.border
+        radius: 10
+        clip: true
 
-        background: Rectangle {
-            color: theme.page
-            border.color: theme.border
-            radius: 10
-        }
-
-        contentItem: Column {
+        Column {
+            id: body
+            width: parent.width
             spacing: 0
 
             ListView {
@@ -1369,6 +1398,7 @@ ApplicationWindow {
                     || kind === "unlinked-header"
             property bool isAgenda: kind === "agenda-row"
             property bool isReference: kind === "reference-row" || kind === "unlinked-row"
+            property bool isResultPage: kind === "search-page"
             property bool isCollapsedMention: kind === "unlinked-row" && !root.unlinkedExpanded
             property bool hovered: false
             property bool isBlockRow: isBlock
@@ -1664,12 +1694,17 @@ ApplicationWindow {
                                 }
                             }
                             event.accepted = true
-                        } else if ((event.key === Qt.Key_B || event.key === Qt.Key_K)
+                        } else if (event.key === Qt.Key_B
                                    && (event.modifiers & Qt.ControlModifier)) {
-                            // The window shortcuts for Ctrl+B and Ctrl+K do the work — a shortcut runs
-                            // first but does not consume the key, so without this TextEdit would also
-                            // act on it (bold for Ctrl+B, delete-to-end-of-line for Ctrl+K) and a
-                            // delegated copy of the action would fire a second time. Consume only.
+                            // TextEdit binds Ctrl+B to bold: take the key and do the thing here, where
+                            // the key is certain to arrive, rather than relying on a window shortcut.
+                            root.sidebarOpen = !root.sidebarOpen
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_K
+                                   && (event.modifiers & Qt.ControlModifier)) {
+                            // TextEdit binds Ctrl+K to delete-to-end-of-line, which would delete the
+                            // block text instead of searching.
+                            root.focusSearch()
                             event.accepted = true
                         } else if (event.key === Qt.Key_S
                                    && (event.modifiers & Qt.ControlModifier)
@@ -1767,7 +1802,7 @@ ApplicationWindow {
                 Label {
                     id: agendaText
                     objectName: "summaryRow"
-                    visible: rowItem.isAgenda || rowItem.isReference
+                    visible: rowItem.isAgenda || rowItem.isReference || rowItem.isResultPage
                     anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
                     anchors.leftMargin: 8
                     anchors.right: sourceLabel.left
@@ -1781,6 +1816,14 @@ ApplicationWindow {
                     color: model.overdue ? theme.danger : theme.text
                     font.pixelSize: 16
                     elide: Text.ElideRight
+                }
+
+                // A page found by name opens with one click: this row is a result, not an editor.
+                MouseArea {
+                    anchors.fill: agendaText
+                    enabled: rowItem.isResultPage
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openPage(model.text)
                 }
 
                 Label {

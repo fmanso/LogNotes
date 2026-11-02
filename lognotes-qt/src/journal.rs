@@ -58,9 +58,13 @@ fn code_colours(theme: &str) -> &'static markdown::CodeColours<'static> {
 /// How many recently opened pages the sidebar remembers.
 const SIDEBAR_RECENT: usize = 8;
 
-/// How many page names and how many blocks the quick switcher shows for one query.
+/// How many page names and how many blocks the quick switcher previews for one query.
 const SEARCH_PAGES: usize = 5;
 const SEARCH_BLOCKS: usize = 20;
+
+/// How many the full results view asks for: the preview's caps are what it exists to lift.
+const ALL_PAGES: usize = 50;
+const ALL_BLOCKS: usize = 500;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -112,6 +116,7 @@ pub mod qobject {
         #[qproperty(u64, revision)]
         #[qproperty(QString, hits)]
         #[qproperty(QString, theme)]
+        #[qproperty(QString, view)]
         #[qproperty(i32, loaded_days)]
         #[qproperty(QString, sidebar)]
         #[qproperty(bool, page_favourite)]
@@ -239,6 +244,15 @@ pub mod qobject {
         #[qinvokable]
         fn apply_theme(self: Pin<&mut Self>, name: &QString);
 
+        /// Show every match for `query`, in the column area — what the preview's "all results" row
+        /// opens.
+        #[qinvokable]
+        fn open_search(self: Pin<&mut Self>, query: &QString);
+
+        /// Back to the column from anywhere.
+        #[qinvokable]
+        fn back(self: Pin<&mut Self>);
+
         /// Star or unstar a page: what the page header's star does, and what fills the
         /// sidebar's Favourites.
         #[qinvokable]
@@ -275,6 +289,8 @@ enum Kind {
     ReferenceRow,
     UnlinkedHeader,
     UnlinkedRow,
+    /// A page whose name matched a query, in the full results view.
+    SearchPage,
 }
 
 /// One row of the column: a date heading, a block under it, or a row of the agenda.
@@ -308,6 +324,8 @@ enum Mode {
     #[default]
     Journal,
     Page(String),
+    /// The full results of a query: every match, in the column area.
+    Search(String),
 }
 
 #[derive(Default)]
@@ -328,6 +346,8 @@ pub struct JournalRust {
     hits: QString,
     /// "light" or "dark", from the store's settings.
     theme: QString,
+    /// Which view the rows describe: "journal", "page" or "search".
+    view: QString,
     /// How many journal days are materialised in the column, empty ones included.
     loaded_days: i32,
     /// The sidebar as `{"favourites": […], "recent": […]}`, refreshed with every snapshot.
@@ -352,7 +372,7 @@ enum Destination {
 
 fn destination(mode: &Mode, row: &Row) -> Destination {
     match mode {
-        Mode::Journal => Destination::Day(row.date.clone()),
+        Mode::Journal | Mode::Search(_) => Destination::Day(row.date.clone()),
         Mode::Page(name) => Destination::Page(name.clone()),
     }
 }
@@ -434,6 +454,10 @@ struct Outcome {
     sidebar: String,
     /// "light" or "dark", from the store's settings.
     theme: String,
+    /// Which view these rows describe: "journal", "page" or "search".
+    view: &'static str,
+    /// The rows of the results view, which are built where the query is answered.
+    search_rows: Vec<Row>,
     /// Whether the page in view is starred.
     page_favourite: bool,
 
@@ -484,6 +508,7 @@ impl qobject::Journal {
                     Kind::ReferenceRow => "reference-row",
                     Kind::UnlinkedHeader => "unlinked-header",
                     Kind::UnlinkedRow => "unlinked-row",
+                    Kind::SearchPage => "search-page",
                 };
                 QVariant::from(&QString::from(kind))
             }
@@ -719,6 +744,20 @@ impl qobject::Journal {
         self.as_mut().dispatch(Some(Command::OpenPage { name }));
     }
 
+    fn open_search(mut self: Pin<&mut Self>, query: &QString) {
+        let query = query.to_string().trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        self.as_mut().rust_mut().mode = Mode::Search(query);
+        self.as_mut().dispatch(None);
+    }
+
+    fn back(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().mode = Mode::Journal;
+        self.as_mut().dispatch(None);
+    }
+
     fn in_fence(self: Pin<&mut Self>, text: &QString, position: i32) -> bool {
         let text = text.to_string();
         markdown::in_fence(&text, byte_offset(&text, position.max(0) as u32))
@@ -851,6 +890,9 @@ impl qobject::Journal {
         {
             let agenda = agenda_rows(&outcome.agenda);
             let mut rows = Vec::new();
+            if outcome.view == "search" {
+                rows.extend(outcome.search_rows.iter().cloned());
+            }
             if let Some(page) = &outcome.page {
                 rows.push(page_header(&page.name, page.journal_date.as_deref()));
                 rows.extend(
@@ -874,6 +916,7 @@ impl qobject::Journal {
                 self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
                 self.as_mut().set_loaded_days(outcome.days.len() as i32);
                 self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+                self.as_mut().set_view(QString::from(outcome.view));
                 self.as_mut().set_page_favourite(outcome.page_favourite);
                 self.as_mut().set_focus_row(focus);
                 self.as_mut().bump_revision();
@@ -909,6 +952,7 @@ impl qobject::Journal {
         self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
         self.as_mut().set_loaded_days(outcome.days.len() as i32);
         self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+        self.as_mut().set_view(QString::from(outcome.view));
         self.as_mut().set_page_favourite(outcome.page_favourite);
         self.as_mut().set_focus_row(focus);
         self.as_mut().bump_revision();
@@ -950,6 +994,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                             page: None,
                             sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
                             theme: "light".to_string(),
+                            view: "journal",
+                            search_rows: Vec::new(),
                             page_favourite: false,
                             ready: false,
                             can_undo: false,
@@ -1000,6 +1046,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         page: None,
                         sidebar: sidebar_json(store),
                         theme: theme_name(store),
+                        view: "journal",
+                        search_rows: Vec::new(),
                         page_favourite: false,
                         ready: true,
                         can_undo: store.can_undo(),
@@ -1097,6 +1145,75 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
     }
 }
 
+/// The full results of a query, as rows: a heading, then the pages whose name matched and the blocks
+/// whose text did. Block rows carry the block and where it lives, so their "from …" label can go there.
+fn search_outcome(store: &Store, query: &str) -> Outcome {
+    let found = store.search(query, ALL_PAGES, ALL_BLOCKS).unwrap_or_default();
+    let mut rows = vec![section_row(
+        Kind::PageHeader,
+        &format!("All results ({}) · {query}", found.total),
+    )];
+
+    if !found.pages.is_empty() {
+        rows.push(section_row(Kind::ReferenceHeader, "Pages"));
+        for page in &found.pages {
+            rows.push(Row {
+                kind: Kind::SearchPage,
+                date: String::new(),
+                block_id: -1,
+                depth: 0,
+                html: markdown::to_html(&page.name),
+                text: page.name.clone(),
+                marker: None,
+                scheduled: None,
+                source: String::new(),
+                overdue: false,
+                diagram: String::new(),
+                diagram_error: String::new(),
+            });
+        }
+    }
+
+    if !found.blocks.is_empty() {
+        rows.push(section_row(Kind::ReferenceHeader, "Blocks"));
+        for hit in &found.blocks {
+            let entry = ReferenceRow {
+                block: hit.block.clone(),
+                page_name: hit.page_name.clone(),
+                journal_date: hit.journal_date.clone(),
+                kind: ReferenceKind::Mention,
+            };
+            let mut row = reference_row(&entry, Kind::ReferenceRow);
+            row.html = highlighted(&hit.snippet, hit.matched);
+            rows.push(row);
+        }
+    }
+
+    Outcome {
+        error: None,
+        days: Vec::new(),
+        agenda: Vec::new(),
+        diagrams: HashMap::new(),
+        page: None,
+        sidebar: sidebar_json(store),
+        theme: theme_name(store),
+        view: "search",
+        search_rows: rows,
+        page_favourite: false,
+        ready: true,
+        can_undo: store.can_undo(),
+        can_redo: store.can_redo(),
+    }
+}
+
+/// A block snippet rendered like any other row, with the words that matched picked out behind them.
+fn highlighted(snippet: &str, matched: Option<(usize, usize)>) -> String {
+    match matched {
+        Some(range) => markdown::to_html_marked(snippet, range),
+        None => markdown::to_html(snippet),
+    }
+}
+
 /// The page a block should be created on, making it — and its day, or its name — exist if it does not.
 fn page_for(store: &mut Store, destination: &Destination) -> Result<i64, String> {
     let fail = |error: lognotes_core::Error| error.to_string();
@@ -1113,6 +1230,9 @@ fn snapshot(
     diagrams: &mut Diagrams,
     theme: &str,
 ) -> Outcome {
+    if let Mode::Search(query) = mode {
+        return search_outcome(store, query);
+    }
     if let Mode::Page(name) = mode {
         let page = store.page_by_name(name).ok().flatten();
         let (blocks, references) = match &page {
@@ -1135,6 +1255,8 @@ fn snapshot(
             days: Vec::new(),
             agenda: Vec::new(),
             diagrams: drawn,
+            view: "page",
+            search_rows: Vec::new(),
             // A day is never starred: the sidebar lists named pages, so a star on one would lead
             // nowhere. Everything else follows the store.
             page_favourite: match (&view.journal_date, &page) {
@@ -1178,6 +1300,8 @@ fn snapshot(
         page: None,
         sidebar: sidebar_json(store),
         theme: theme.to_string(),
+        view: "journal",
+        search_rows: Vec::new(),
         page_favourite: false,
         ready: true,
         can_undo: store.can_undo(),
@@ -1371,7 +1495,10 @@ fn row_of_block(rows: &[Row], block_id: i32) -> i32 {
 /// A search answer the view can read: `{"error": "", "hits": […]}`. A failed query says so instead of
 /// looking like "nothing found".
 fn search_failed(error: &str) -> String {
-    format!("{{\"error\":{},\"hits\":[]}}", json_string(error))
+    format!(
+        "{{\"error\":{},\"total\":0,\"hits\":[]}}",
+        json_string(error)
+    )
 }
 
 fn search_json(results: &SearchResults) -> String {
@@ -1401,7 +1528,11 @@ fn search_json(results: &SearchResults) -> String {
         ));
     }
 
-    format!("{{\"error\":\"\",\"hits\":[{}]}}", hits.join(","))
+    format!(
+        "{{\"error\":\"\",\"total\":{},\"hits\":[{}]}}",
+        results.total,
+        hits.join(",")
+    )
 }
 
 fn json_string(value: &str) -> String {
