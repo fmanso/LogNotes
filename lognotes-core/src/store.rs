@@ -645,6 +645,22 @@ impl Store {
         Ok(pages)
     }
 
+    /// Write a consistent copy of the whole database to `path`.
+    ///
+    /// `VACUUM INTO` is the one way to copy a live SQLite database and get a file that is not a torn mix of
+    /// pages: it reads under the connection's own snapshot and writes a compacted copy that opens on its
+    /// own. The file must not exist — this removes it first, so re-running a backup for the same day just
+    /// rewrites it.
+    pub fn backup_into(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|error| Error::Backup(error.to_string()))?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
     /// A stored setting, or `None` when it was never written.
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self

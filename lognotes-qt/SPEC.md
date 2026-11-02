@@ -279,6 +279,10 @@ with the command's effect and never types markdown into the block, and each comm
 - **Code fences are coloured by the view's palette.** The four colours live in `CODE_COLOURS` in the bridge
   and are handed to `to_html_block`; core decides what a token is, the view decides what it looks like. A
   fence whose language nobody knows renders as plain code.
+- **A backup is written as the store opens.** The worker copies the database with SQLite's own `VACUUM
+  INTO` (a consistent copy of a live file, not a read of its pages) into `backups/` beside it, at most once a
+  day, keeping the newest seven. It happens before any typing, and a failed backup is not a reason to refuse
+  to open the notes.
 - **A past day nobody wrote in leaves no trace.** `shows_day` keeps the newest day — that is where the
   cursor goes — and every day before it only when it has blocks. The column is a record of what was
   written, not of the calendar, and it fills itself: while it is shorter than the window it pulls older

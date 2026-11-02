@@ -584,12 +584,6 @@ ApplicationWindow {
 
     // ---- the quick switcher ------------------------------------------------------------------
     // Ctrl+K over anything: page names first, then blocks whose text matches.
-    Shortcut {
-        sequence: "Esc"
-        enabled: journal.view === "search"
-        onActivated: journal.back()
-    }
-
     // Typing in the bar is what opens the results; Ctrl+K only puts the caret there.
     function focusSearch() {
         root.closeSlash()
@@ -1365,6 +1359,15 @@ ApplicationWindow {
         model: journal
         spacing: 3
         clip: true
+        // The results view has no editor to hold the caret, so the list takes the focus while it is
+        // showing and Esc leaves from here. A window shortcut would need the window to be active.
+        focus: journal.view === "search"
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Escape && journal.view === "search") {
+                journal.back()
+                event.accepted = true
+            }
+        }
         // No off-screen delegate cache: every save rebuilds the model, and a cached delegate from before
         // the rebuild lingers in the tree — invisible on screen, visible to anything that walks it.
         cacheBuffer: 0

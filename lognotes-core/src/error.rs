@@ -27,6 +27,9 @@ pub enum Error {
 
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
+
+    #[error("could not write the backup: {0}")]
+    Backup(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

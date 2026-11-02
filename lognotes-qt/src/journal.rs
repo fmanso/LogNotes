@@ -982,6 +982,12 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 };
                 match opened {
                     Ok(opened) => {
+                        // A copy before any typing, at most once a day. Failing to write one must not stop
+                        // the notes from opening.
+                        if let Some(path) = DATABASE_PATH.get() {
+                            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                            let _ = crate::backup::daily(&opened, path, &today);
+                        }
                         let theme = theme_name(&opened);
                         let outcome = snapshot(&opened, &dates, &mode, &mut diagrams, &theme);
                         store = Some(opened);
