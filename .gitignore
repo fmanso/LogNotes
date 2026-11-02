@@ -1,1 +1,6 @@
 /target
+/dist
+
+# Editor and agent state, not part of the project.
+.qmlls.ini
+.thinkrail/

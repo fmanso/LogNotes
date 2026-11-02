@@ -9,7 +9,10 @@ SLICE = systemd-run --user --scope --slice=lognotes-build.slice -p MemoryHigh=6G
 JOBS = CARGO_BUILD_JOBS=6
 LIVETEST = QSG_RENDER_LOOP=basic $(JOBS) cargo run -p lognotes-qt --features driver -- --livetest
 
-.PHONY: build release test livetest run
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+ARCH := $(shell uname -m)
+
+.PHONY: build release test livetest run dist
 
 ## Build the app (debug).
 build:
@@ -30,3 +33,12 @@ livetest:
 ## Run the app itself (needs a display; not isolated, because it is the thing you are looking at).
 run:
 	$(JOBS) cargo run -p lognotes-qt
+
+## Package the Linux build: the binary, a desktop entry, an icon, the readme and the licence.
+dist: release
+	rm -rf dist/stage
+	mkdir -p dist/stage/lognotes-$(VERSION)
+	cp target/release/lognotes-qt dist/stage/lognotes-$(VERSION)/
+	cp packaging/lognotes.desktop packaging/lognotes.svg README.md LICENSE dist/stage/lognotes-$(VERSION)/
+	tar -czf dist/lognotes-$(VERSION)-linux-$(ARCH).tar.gz -C dist/stage lognotes-$(VERSION)
+	@echo dist/lognotes-$(VERSION)-linux-$(ARCH).tar.gz

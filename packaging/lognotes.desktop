@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LogNotes
+Comment=A journal-first outliner on a local database
+Exec=lognotes-qt
+Icon=lognotes
+Terminal=false
+Categories=Office;Utility;
+Keywords=notes;journal;outliner;logseq;
+StartupWMClass=lognotes-qt

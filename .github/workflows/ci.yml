@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The platform this is developed on: every unit test, then the packaged release.
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Qt comes from the Qt project rather than the distribution, so both jobs build against the same
+      # version and neither depends on what a distro happens to ship.
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          modules: 'qtdeclarative qtsvg'
+          cache: true
+
+      - name: A C++ toolchain and the GL headers Qt Quick links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libgl1-mesa-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test --workspace --jobs 2
+
+      - name: Package
+        run: make dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lognotes-linux
+          path: dist/*.tar.gz
+
+  # The platform with no machine behind it here: this job is also the check that the code builds on Windows.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          modules: 'qtdeclarative qtsvg'
+          cache: true
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release -p lognotes-qt --jobs 2
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lognotes-windows
+          path: dist/*.zip

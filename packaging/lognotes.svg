@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- A page of ruled lines with a bullet, in the app's cream and ink. -->
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#faf9f7" stroke="#ddd8ce" stroke-width="2"/>
+  <circle cx="17" cy="21" r="3" fill="#3a6ea5"/>
+  <rect x="24" y="19.5" width="26" height="3" rx="1.5" fill="#242424"/>
+  <circle cx="23" cy="33" r="3" fill="#8a857c"/>
+  <rect x="30" y="31.5" width="20" height="3" rx="1.5" fill="#5b5b5b"/>
+  <rect x="30" y="41" width="14" height="3" rx="1.5" fill="#a39c90"/>
+  <circle cx="17" cy="45" r="3" fill="#4a7c59"/>
+  <rect x="24" y="43.5" width="10" height="3" rx="1.5" fill="#a39c90"/>
+</svg>
