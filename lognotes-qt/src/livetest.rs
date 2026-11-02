@@ -153,22 +153,24 @@ pub fn run() -> ! {
         format!("blocks={:?}", blocks(&root)),
     );
 
-    // Scrolling to the end pulls in the next chunk of older days. How many wheel events that takes
-    // depends on how tall the rows are, so scroll until the chunk lands rather than counting.
-    let rows_before = driver::row_count();
+    // Empty past days are hidden, so a column with nothing older is shorter than the window; the app
+    // pulls older days until it fills rather than leaving a dead scroll. That is what grows here.
     for _ in 0..4 {
         driver::scroll_to_end();
-        driver::wait_ms(400);
-        if driver::row_count() > rows_before {
-            break;
-        }
+        driver::wait_ms(300);
     }
     driver::wait_ms(900);
     shot("09-scrolled");
+    let loaded_after = driver::journal_property(&QString::from("loaded_days")).to_string();
     check(
-        "scrolling loads an older chunk",
-        driver::row_count() > rows_before,
-        format!("rows {} -> {}", rows_before, driver::row_count()),
+        "older days are pulled in to fill the column",
+        loaded_after != "14",
+        format!("loaded days={loaded_after}"),
+    );
+    check(
+        "empty past days take no room in the column",
+        driver::row_count() < 10,
+        format!("rows={} loaded={loaded_after}", driver::row_count()),
     );
 
     // ---- markers, scheduling and the agenda ------------------------------------------------
@@ -249,18 +251,17 @@ pub fn run() -> ! {
     driver::press_key(key::RETURN, modifier::NONE);
     driver::wait_ms(900);
     shot("16-page-view");
-    let page_rows = driver::row_count();
     check(
         "the page created by the link can be opened from search",
-        page_rows > 0 && page_rows < 20,
-        format!("rows={page_rows}"),
+        driver::visible(&QString::from("favouriteStar")),
+        format!("rows={}", driver::row_count()),
     );
 
     // Its reference panel: one linked reference, and the plain mention behind a collapsed group.
     let page_open = driver::row_count();
     check(
         "the page shows blocks and references",
-        page_open > 2,
+        driver::visible(&QString::from("favouriteStar")) && page_open > 2,
         format!("rows={page_open}"),
     );
 
@@ -337,6 +338,22 @@ pub fn run() -> ! {
         "a summary row renders its markdown with a live page link",
         summary.contains("href=\"page:My Project\"") && !summary.contains("[["),
         format!("html={summary:?}"),
+    );
+
+    let followed = driver::click_named(&QString::from("sourceLabel"), 0);
+    driver::wait_ms(900);
+    shot("17a-from-label");
+    check(
+        "the from-label goes to the block it names",
+        followed && !driver::visible(&QString::from("favouriteStar")),
+        format!("rows={}", driver::row_count()),
+    );
+    driver::type_text(&QString::from("Z"));
+    driver::wait_ms(800);
+    check(
+        "and the caret lands in that block",
+        blocks(&root).iter().any(|block| block.contains('Z')),
+        format!("blocks={:?}", blocks(&root)),
     );
 
     let switched_back = driver::click_named(&QString::from("journalButton"), 0);
@@ -635,7 +652,7 @@ pub fn run() -> ! {
 
     check(
         "the journal is reachable again from the switcher",
-        driver::row_count() > page_open,
+        !driver::visible(&QString::from("favouriteStar")),
         format!("rows={}", driver::row_count()),
     );
 

@@ -81,9 +81,14 @@ ApplicationWindow {
     // The window waits for the store, because the theme lives there and appearing light and then
     // turning dark is worse than appearing a few milliseconds later.
     property bool revealed: false
+    // Empty past days are hidden, so the column can be shorter than the window. Older chunks are
+    // pulled until it fills, or until a few pulls in a row have found nothing.
+    property int emptyPulls: 0
 
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
     function openPage(name) {
+        root.emptyPulls = 0
+        root.editingRow = -1
         root.unlinkedExpanded = false
         root.focusRow = -1
         root.pendingViewFocus = true
@@ -92,6 +97,8 @@ ApplicationWindow {
     }
 
     function goJournal() {
+        root.emptyPulls = 0
+        root.editingRow = -1
         root.unlinkedExpanded = false
         root.focusRow = -1
         root.pendingViewFocus = true
@@ -148,11 +155,10 @@ ApplicationWindow {
         target: journal
 
         function onReadyChanged() {
-            if (journal.ready || journal.error !== "") {
+            // The ready path reveals in `onRevisionChanged`, after the column has been filled; only the
+            // failure path has no snapshot to wait for.
+            if (journal.error !== "") {
                 root.revealed = true
-            }
-            if (journal.ready && root.focusRow < 0) {
-                root.beginEdit(root.firstBlockRow(), 0)
             }
         }
 
@@ -194,7 +200,27 @@ ApplicationWindow {
         }
 
         function onRevisionChanged() {
-            root.rebuilding = false
+            // `rebuilding` stays up for the rest of this turn: the delegate that was just destroyed
+            // reports its blur *after* this handler, and that blur must not render the block the
+            // caret is about to go back into.
+            Qt.callLater(function () { root.rebuilding = false })
+
+            // Empty past days are hidden, so a fresh column can be shorter than the window. Older days
+            // are pulled in *before* the window appears — each pull resets the model, and doing that
+            // after the caret has been granted loses it.
+            if (!root.revealed) {
+                if (journal.ready && list.atYEnd && root.emptyPulls < 3 && list.count > 0) {
+                    root.emptyPulls += 1
+                    root.rebuilding = true
+                    journal.load_more()
+                    return
+                }
+                root.revealed = true
+                if (root.focusRow < 0) {
+                    root.beginEdit(root.firstBlockRow(), 0)
+                }
+                return
+            }
 
             // A search hit asked for the caret to be put in a block: this snapshot has the row, so put
             // the caret on the match rather than at the start of the block.
@@ -219,6 +245,7 @@ ApplicationWindow {
             }
             // Every applied snapshot means the pending text has been written.
             root.unsaved = ({})
+
             if (root.wantsFocus && root.focusRow >= 0) {
                 root.focusRetries = 0
                 // Take the focus back now rather than next frame, for the same reason a click does:
@@ -335,6 +362,7 @@ ApplicationWindow {
 
     // Typing in the bar is what opens the results; Ctrl+K only puts the caret there.
     function focusSearch() {
+        root.editingRow = -1
         searchField.forceActiveFocus()
         searchField.selectAll()
         if (searchField.text !== "") {
@@ -356,6 +384,10 @@ ApplicationWindow {
         }
         const hit = searchModel.get(index)
         searchPopup.close()
+        // Give the caret back to the content: leaving it in the field meant the next keystroke landed in
+        // the search box instead of the page that had just opened.
+        searchField.text = ""
+        searchField.focus = false
         if (hit.kind === "page") {
             root.openLink("page:" + hit.page)
         } else {
@@ -384,6 +416,14 @@ ApplicationWindow {
                 searchPopup.close()
             }
         }
+    }
+
+    // "from Nov 1" goes to the block itself: its journal day, or the page it lives on, with the caret
+    // in it — the same move a search hit makes.
+    function openSource(blockId, source) {
+        const isDate = /^\d{4}-\d{2}-\d{2}$/.test(source)
+        root.rebuilding = true
+        journal.open_block(blockId, isDate ? "" : source, isDate ? source : "")
     }
 
     // One place decides what following a link means: a page link opens that page, anything else leaves
@@ -1321,6 +1361,7 @@ ApplicationWindow {
 
                 Label {
                     id: sourceLabel
+                    objectName: "sourceLabel"
                     visible: rowItem.isAgenda || rowItem.isReference
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
@@ -1341,6 +1382,17 @@ ApplicationWindow {
                     }
                     color: model.overdue ? theme.danger : theme.textFaint
                     font.pixelSize: 12
+
+                }
+
+                // Only the "from …" label navigates, and the target sits over the label rather than
+                // inside it: a MouseArea nested in a Label is not reliably hit.
+                MouseArea {
+                    anchors.fill: sourceLabel
+                    anchors.margins: -4
+                    enabled: rowItem.isReference
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openSource(model.blockId, model.source)
                 }
             }
 

@@ -112,6 +112,7 @@ pub mod qobject {
         #[qproperty(u64, revision)]
         #[qproperty(QString, hits)]
         #[qproperty(QString, theme)]
+        #[qproperty(i32, loaded_days)]
         #[qproperty(QString, sidebar)]
         #[qproperty(bool, page_favourite)]
         #[qproperty(i32, focus_row)]
@@ -309,6 +310,8 @@ pub struct JournalRust {
     hits: QString,
     /// "light" or "dark", from the store's settings.
     theme: QString,
+    /// How many journal days are materialised in the column, empty ones included.
+    loaded_days: i32,
     /// The sidebar as `{"favourites": […], "recent": […]}`, refreshed with every snapshot.
     sidebar: QString,
     /// Whether the page in view is starred, for the star in its header.
@@ -798,6 +801,7 @@ impl qobject::Journal {
                 self.as_mut().set_can_undo(outcome.can_undo);
                 self.as_mut().set_can_redo(outcome.can_redo);
                 self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
+                self.as_mut().set_loaded_days(outcome.days.len() as i32);
                 self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
                 self.as_mut().set_page_favourite(outcome.page_favourite);
                 self.as_mut().set_focus_row(focus);
@@ -805,11 +809,14 @@ impl qobject::Journal {
                 return;
             }
             for (index, (date, blocks)) in outcome.days.iter().enumerate() {
-                if index == 1 && !agenda.is_empty() {
+                if !shows_day(index, blocks) {
+                    continue;
+                }
+                rows.extend(day_rows(date, blocks, &outcome.diagrams, &outcome.theme));
+                if index == 0 && !agenda.is_empty() {
                     // "Right under today's blocks": today is the newest day in the column.
                     rows.extend(agenda.iter().cloned());
                 }
-                rows.extend(day_rows(date, blocks, &outcome.diagrams, &outcome.theme));
             }
             if rows.is_empty() {
                 rows.extend(agenda.iter().cloned());
@@ -829,6 +836,7 @@ impl qobject::Journal {
         self.as_mut().set_can_undo(outcome.can_undo);
         self.as_mut().set_can_redo(outcome.can_redo);
         self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
+        self.as_mut().set_loaded_days(outcome.days.len() as i32);
         self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
         self.as_mut().set_page_favourite(outcome.page_favourite);
         self.as_mut().set_focus_row(focus);
@@ -1113,6 +1121,13 @@ fn heading(date: &str) -> Row {
         diagram: String::new(),
         diagram_error: String::new(),
     }
+}
+
+/// Whether a day at this position in the column is worth a heading. The newest day always is — that is
+/// where the cursor goes — and every day after it only if someone wrote in it: the journal is a record
+/// of what was written, not of the calendar.
+fn shows_day(index: usize, blocks: &[BlockRow]) -> bool {
+    index == 0 || !blocks.is_empty()
 }
 
 fn day_rows(
@@ -1456,6 +1471,13 @@ mod tests {
         assert_eq!((rows[1].block_id, rows[1].depth), (7, 0));
         assert_eq!((rows[2].block_id, rows[2].depth), (8, 1));
         assert!(rows[1..].iter().all(|row| row.kind == Kind::Block));
+    }
+
+    #[test]
+    fn a_past_day_with_nothing_in_it_is_not_shown() {
+        assert!(shows_day(0, &[]), "today is shown even when it is empty");
+        assert!(!shows_day(1, &[]), "yesterday is not, when nothing was written");
+        assert!(shows_day(1, &[block(1, 0, "something")]));
     }
 
     #[test]

@@ -204,6 +204,11 @@ and it keeps the database path the only OS-specific location in the codebase.
   button, a sidebar toggle and the theme toggle; typing in the field opens the results just under it, and
   `Ctrl+K` only puts the caret there. The sidebar lists Favourites then Recent (eight), and the Pages
   popup is gone — one way to reach a page, not two. A page is starred from the star in its own header.
+- **Focus leaves a block only when something else takes it.** The blur that follows a rebuild cannot say
+  whether the caret is gone or merely being handed back, so `rebuilding` stays up until the next turn
+  (`Qt.callLater`) and the delegate that was destroyed reports its blur while the flag is still set.
+  The search field hands focus back when a hit is activated — leaving it there meant the next keystroke
+  landed in the search box instead of the page that had just opened.
 - **`Ctrl+K` and `Ctrl+B`: the shortcut acts, the delegate consumes.** A window `Shortcut` runs before the
   focused item sees the key but does not consume it, and `TextEdit` binds the same keys to
   delete-to-end-of-line and bold — so a delegate that *acted* as well toggled twice, and one that did
@@ -225,6 +230,15 @@ and it keeps the database path the only OS-specific location in the codebase.
 - **Code fences are coloured by the view's palette.** The four colours live in `CODE_COLOURS` in the bridge
   and are handed to `to_html_block`; core decides what a token is, the view decides what it looks like. A
   fence whose language nobody knows renders as plain code.
+- **A past day nobody wrote in leaves no trace.** `shows_day` keeps the newest day — that is where the
+  cursor goes — and every day before it only when it has blocks. The column is a record of what was
+  written, not of the calendar, and it fills itself: while it is shorter than the window it pulls older
+  chunks (three at most, and before the window appears, because each pull resets the model and doing
+  that after the caret is granted loses it).
+- **A reference row's "from …" label goes to the block.** It opens the block's page or journal day and
+  puts the caret in the block, through the same `open_block` path a search hit uses; a `[[link]]` inside
+  the row still goes to *that* page. The target sits over the label rather than inside it, because a
+  MouseArea nested in a Label is not reliably hit.
 - **A read-only row is rendered, not styled.** The agenda and reference rows are `Label`s with rich text
   from the `html` role: the scan's dim spans are dropped, so the row reads as finished text, and its links
   navigate on a plain click.
