@@ -89,9 +89,13 @@ ApplicationWindow {
         return bytes + " B"
     }
 
-    // `lognotes-2026-11-02.db` reads as a date; a manual copy adds the time.
+    // `lognotes-2026-11-02.db` reads as a date; a manual copy adds `T202538`, which reads as 20:25.
     function backupLabel(name) {
-        return name.replace(/^lognotes-/, "").replace(/\.db$/, "").replace("T", " ")
+        const bare = name.replace(/^lognotes-/, "").replace(/\.db$/, "")
+        const parts = bare.split("T")
+        if (parts.length !== 2) return bare
+        const time = parts[1]
+        return parts[0] + " " + time.slice(0, 2) + ":" + time.slice(2, 4)
     }
 
     // The quick switcher: one field over the whole graph. `searchHits` is rebuilt from the model's JSON

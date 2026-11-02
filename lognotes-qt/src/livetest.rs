@@ -907,6 +907,18 @@ pub fn run() -> ! {
         format!("note={:?} days={} pages={}", note(), days.len(), markdown_in("pages").len()),
     );
 
+    // The page has to hold up in the other theme too.
+    driver::click_named(&QString::from("themeButton"), 0);
+    driver::settle();
+    shot("31b-settings-dark");
+    check(
+        "the settings page survives the theme switch",
+        driver::visible(&QString::from("settingsPage")),
+        format!("theme={}", driver::journal_property(&QString::from("theme")).to_string()),
+    );
+    driver::click_named(&QString::from("themeButton"), 0);
+    driver::settle();
+
     // Import: a small Logseq folder, written by hand the way Logseq writes one.
     let logseq = root.join("logseq-in");
     std::fs::create_dir_all(logseq.join("journals")).expect("the import folder");
