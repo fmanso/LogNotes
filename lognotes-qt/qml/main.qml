@@ -69,6 +69,11 @@ ApplicationWindow {
     // The one block currently in edit mode; every other block shows its markdown rendered. It lives on
     // the window rather than on a delegate because delegates are rebuilt after every save.
     property int editingRow: -1
+    // A word to put the caret on once a block is focused — the search term a hit was found by. It is
+    // applied in `focusBlock`, because the delegate may not exist yet when the hit is activated.
+    property string focusTerm: ""
+    // The term a search hit was activated with, captured before the field is cleared.
+    property string pendingTerm: ""
 
     // The unlinked-mentions group is collapsed until you ask for it; 0.x behaviour, and it keeps a
     // page's reference panel short.
@@ -88,6 +93,7 @@ ApplicationWindow {
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
     function openPage(name) {
         root.closeSlash()
+        searchField.focus = false
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -99,6 +105,7 @@ ApplicationWindow {
 
     function goJournal() {
         root.closeSlash()
+        searchField.focus = false
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -141,7 +148,12 @@ ApplicationWindow {
     Timer {
         interval: 2000
         running: !root.revealed
-        onTriggered: root.revealed = true
+        onTriggered: {
+            root.revealed = true
+            if (root.focusRow < 0) {
+                root.beginEdit(root.firstBlockRow(), 0)
+            }
+        }
     }
 
     Journal {
@@ -218,10 +230,6 @@ ApplicationWindow {
                     return
                 }
                 root.revealed = true
-                if (root.focusRow < 0) {
-                    root.beginEdit(root.firstBlockRow(), 0)
-                }
-                return
             }
 
             // A search hit asked for the caret to be put in a block: this snapshot has the row, so put
@@ -229,17 +237,9 @@ ApplicationWindow {
             if (journal.focus_row >= 0) {
                 const row = journal.focus_row
                 journal.clear_focus_row()
-                let caret = 0
-                const term = searchField.text.trim().toLowerCase()
-                if (term !== "") {
-                    const item = list.itemAtIndex(row)
-                    const text = item && item.blockEditor ? item.blockEditor.text.toLowerCase() : ""
-                    const at = text.indexOf(term)
-                    if (at >= 0) {
-                        caret = at
-                    }
-                }
-                root.beginEdit(row, caret)
+                root.focusTerm = root.pendingTerm
+                root.pendingTerm = ""
+                root.beginEdit(row, 0)
             }
             if (root.pendingViewFocus) {
                 root.pendingViewFocus = false
@@ -248,7 +248,10 @@ ApplicationWindow {
             // Every applied snapshot means the pending text has been written.
             root.unsaved = ({})
 
-            if (root.wantsFocus && root.focusRow >= 0) {
+            if (root.focusRow < 0) {
+                // Nothing has asked for the caret yet: the app opens ready to type.
+                root.beginEdit(root.firstBlockRow(), 0)
+            } else if (root.wantsFocus) {
                 root.focusRetries = 0
                 // Take the focus back now rather than next frame, for the same reason a click does:
                 // whatever is typed while the model rebuilds must land in the block being edited.
@@ -316,6 +319,13 @@ ApplicationWindow {
         const item = list.itemAtIndex(row)
         if (item && item.blockEditor && !item.isHeading) {
             item.blockEditor.forceActiveFocus()
+            if (root.focusTerm !== "") {
+                const at = item.blockEditor.text.toLowerCase().indexOf(root.focusTerm.toLowerCase())
+                if (at >= 0) {
+                    root.focusCursor = at
+                }
+                root.focusTerm = ""
+            }
             root.focusCursor = Math.min(root.focusCursor, item.blockEditor.length)
             item.blockEditor.cursorPosition = root.focusCursor
             return true
@@ -596,6 +606,7 @@ ApplicationWindow {
         searchPopup.close()
         // Give the caret back to the content: leaving it in the field meant the next keystroke landed in
         // the search box instead of the page that had just opened.
+        root.pendingTerm = searchField.text.trim()
         searchField.text = ""
         searchField.focus = false
         if (hit.kind === "page") {
@@ -631,6 +642,7 @@ ApplicationWindow {
     // "from Nov 1" goes to the block itself: its journal day, or the page it lives on, with the caret
     // in it — the same move a search hit makes.
     function openSource(blockId, source) {
+        searchField.focus = false
         const isDate = /^\d{4}-\d{2}-\d{2}$/.test(source)
         root.rebuilding = true
         journal.open_block(blockId, isDate ? "" : source, isDate ? source : "")
@@ -1563,11 +1575,10 @@ ApplicationWindow {
                         if (root.slashRow === index) {
                             root.dropSlash()
                         }
-                        // An input method composes a character before it is text — a dead key on the
-                        // Spanish layout is one — and saving now would rebuild the model, destroy the
-                        // editor holding the composition, and take the character with it. Wait for the
-                        // composition to finish; that is when the text is really typed.
-                        if (!editor.inputMethodComposing) {
+                        // Only text that differs from the stored one needs saving: a caret that merely
+                        // moved inside a block would otherwise queue a save, rebuild the model and put
+                        // the caret back where it was.
+                        if (!editor.inputMethodComposing && editor.text !== model.text) {
                             debounce.restart()
                         }
                     }

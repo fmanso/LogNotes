@@ -23,12 +23,16 @@ mod ffi {
         fn lognotes_save_png(path: &QString) -> bool;
         #[rust_name = "wait_ms"]
         fn lognotes_wait_ms(ms: i32);
+        #[rust_name = "settle"]
+        fn lognotes_settle();
         #[rust_name = "focus_name"]
         fn lognotes_focus_name() -> QString;
         #[rust_name = "row_count"]
         fn lognotes_row_count() -> i32;
         #[rust_name = "click_block"]
         fn lognotes_click_block(index: i32) -> bool;
+        #[rust_name = "click_block_at"]
+        fn lognotes_click_block_at(index: i32, fraction: f64) -> bool;
         #[rust_name = "editor_text"]
         fn lognotes_editor_text(index: i32) -> QString;
         #[rust_name = "editor_debug"]
@@ -41,6 +45,8 @@ mod ffi {
         fn lognotes_click_link(index: i32) -> bool;
         #[rust_name = "visible"]
         fn lognotes_visible(name: &QString) -> bool;
+        #[rust_name = "rendered_html"]
+        fn lognotes_rendered_html() -> QString;
         #[rust_name = "row_html"]
         fn lognotes_row_html(index: i32) -> QString;
         #[rust_name = "search_count"]
