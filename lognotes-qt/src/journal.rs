@@ -35,24 +35,27 @@ const CHUNK_DAYS: u32 = 14;
 /// How far ahead the agenda looks. The rule itself lives in `lognotes`.
 const AGENDA_HORIZON_DAYS: u32 = 7;
 
-/// The colours a rendered code fence uses: the app's own palette, and the only place HTML colour is
-/// chosen. They are passed into the renderer because Qt's rich text takes colours inline only.
-const CODE_LIGHT: markdown::CodeColours<'_> = markdown::CodeColours {
+/// The colours the rendered HTML uses — fence tokens and links: the app's own palette, and the only place
+/// HTML colour is chosen. They are passed into the renderer because Qt's rich text takes colours inline
+/// only, and because Qt's default link colour is a stock blue that belongs to neither theme.
+const INK_LIGHT: markdown::Ink<'_> = markdown::Ink {
+    link: "#3a6ea5",
     keyword: "#3a6ea5",
     string: "#4a7c59",
     comment: "#a39c90",
     number: "#a4443c",
 };
 
-const CODE_DARK: markdown::CodeColours<'_> = markdown::CodeColours {
+const INK_DARK: markdown::Ink<'_> = markdown::Ink {
+    link: "#8fb6e8",
     keyword: "#8fb6e8",
     string: "#8fc79c",
     comment: "#8f8a80",
     number: "#e0948a",
 };
 
-fn code_colours(theme: &str) -> &'static markdown::CodeColours<'static> {
-    if theme == "dark" { &CODE_DARK } else { &CODE_LIGHT }
+fn ink(theme: &str) -> &'static markdown::Ink<'static> {
+    if theme == "dark" { &INK_DARK } else { &INK_LIGHT }
 }
 
 /// How many recently opened pages the sidebar remembers.
@@ -888,7 +891,7 @@ impl qobject::Journal {
         let pending = self.pending_focus;
         let focus;
         {
-            let agenda = agenda_rows(&outcome.agenda);
+            let agenda = agenda_rows(&outcome.agenda, &outcome.theme);
             let mut rows = Vec::new();
             if outcome.view == "search" {
                 rows.extend(outcome.search_rows.iter().cloned());
@@ -900,7 +903,7 @@ impl qobject::Journal {
                         .into_iter()
                         .skip(1),
                 );
-                rows.extend(reference_rows(&page.references));
+                rows.extend(reference_rows(&page.references, &outcome.theme));
                 focus = row_of_block(&rows, pending);
                 let mut rust = self.as_mut().rust_mut();
                 rust.pending_focus = -1;
@@ -1007,7 +1010,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
             Job::Search { query, queue } => {
                 let json = match store.as_ref() {
                     Some(store) => match store.search(&query, SEARCH_PAGES, SEARCH_BLOCKS) {
-                        Ok(results) => search_json(&results),
+                        Ok(results) => search_json(&results, ink(&theme_name(store))),
                         Err(error) => search_failed(&error.to_string()),
                     },
                     None => search_failed("the database is not open"),
@@ -1148,6 +1151,7 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
 /// The full results of a query, as rows: a heading, then the pages whose name matched and the blocks
 /// whose text did. Block rows carry the block and where it lives, so their "from …" label can go there.
 fn search_outcome(store: &Store, query: &str) -> Outcome {
+    let colours = ink(&theme_name(store));
     let found = store.search(query, ALL_PAGES, ALL_BLOCKS).unwrap_or_default();
     let mut rows = vec![section_row(
         Kind::PageHeader,
@@ -1162,7 +1166,7 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
                 date: String::new(),
                 block_id: -1,
                 depth: 0,
-                html: markdown::to_html(&page.name),
+                html: markdown::to_html(&page.name, colours),
                 text: page.name.clone(),
                 marker: None,
                 scheduled: None,
@@ -1183,8 +1187,8 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
                 journal_date: hit.journal_date.clone(),
                 kind: ReferenceKind::Mention,
             };
-            let mut row = reference_row(&entry, Kind::ReferenceRow);
-            row.html = highlighted(&hit.snippet, hit.matched);
+            let mut row = reference_row(&entry, Kind::ReferenceRow, &theme_name(store));
+            row.html = highlighted(&hit.snippet, hit.matched, colours);
             rows.push(row);
         }
     }
@@ -1207,10 +1211,10 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
 }
 
 /// A block snippet rendered like any other row, with the words that matched picked out behind them.
-fn highlighted(snippet: &str, matched: Option<(usize, usize)>) -> String {
+fn highlighted(snippet: &str, matched: Option<(usize, usize)>, colours: &markdown::Ink) -> String {
     match matched {
-        Some(range) => markdown::to_html_marked(snippet, range),
-        None => markdown::to_html(snippet),
+        Some(range) => markdown::to_html_marked(snippet, range, colours),
+        None => markdown::to_html(snippet, colours),
     }
 }
 
@@ -1380,7 +1384,7 @@ fn day_rows(
             depth: block.depth,
             // A block is shown as this until it is clicked, so it keeps its line breaks — a fence has to
             // still read as a block of code.
-            html: markdown::to_html_block(&block.content, code_colours(theme)),
+            html: markdown::to_html_block(&block.content, ink(theme)),
             text: block.content.clone(),
             marker: block.marker,
             scheduled: block.scheduled_date.clone(),
@@ -1412,7 +1416,7 @@ fn page_header(name: &str, journal_date: Option<&str>) -> Row {
 }
 
 /// The reference panels: explicit links first, then a collapsed group of plain mentions.
-fn reference_rows(references: &[ReferenceRow]) -> Vec<Row> {
+fn reference_rows(references: &[ReferenceRow], theme: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let linked: Vec<&ReferenceRow> = references
         .iter()
@@ -1425,7 +1429,7 @@ fn reference_rows(references: &[ReferenceRow]) -> Vec<Row> {
 
     if !linked.is_empty() {
         rows.push(section_row(Kind::ReferenceHeader, "Linked References"));
-        rows.extend(linked.into_iter().map(|entry| reference_row(entry, Kind::ReferenceRow)));
+        rows.extend(linked.into_iter().map(|entry| reference_row(entry, Kind::ReferenceRow, theme)));
     }
 
     if !mentions.is_empty() {
@@ -1436,7 +1440,7 @@ fn reference_rows(references: &[ReferenceRow]) -> Vec<Row> {
         rows.extend(
             mentions
                 .into_iter()
-                .map(|entry| reference_row(entry, Kind::UnlinkedRow)),
+                .map(|entry| reference_row(entry, Kind::UnlinkedRow, theme)),
         );
     }
 
@@ -1460,14 +1464,14 @@ fn section_row(kind: Kind, text: &str) -> Row {
     }
 }
 
-fn reference_row(entry: &ReferenceRow, kind: Kind) -> Row {
+fn reference_row(entry: &ReferenceRow, kind: Kind, theme: &str) -> Row {
     Row {
         kind,
         date: String::new(),
         block_id: entry.block.id as i32,
         depth: 0,
         // A summary row has no editor, so its styling comes ready-made as HTML.
-        html: markdown::to_html(&entry.block.content),
+        html: markdown::to_html(&entry.block.content, ink(theme)),
         text: entry.block.content.clone(),
         marker: entry.block.marker,
         scheduled: None,
@@ -1501,7 +1505,7 @@ fn search_failed(error: &str) -> String {
     )
 }
 
-fn search_json(results: &SearchResults) -> String {
+fn search_json(results: &SearchResults, colours: &markdown::Ink) -> String {
     let mut hits: Vec<String> = Vec::new();
 
     for page in &results.pages {
@@ -1520,7 +1524,7 @@ fn search_json(results: &SearchResults) -> String {
         hits.push(format!(
             "{{\"kind\":\"block\",\"title\":{},\"where\":{},\"blockId\":{},\"page\":{},\"date\":{}}}",
             // The block's text is rendered here as it is everywhere else it is read: marks gone.
-            json_string(&markdown::to_html(&hit.snippet)),
+            json_string(&markdown::to_html(&hit.snippet, colours)),
             json_string(&where_),
             hit.block.id,
             json_string(&hit.page_name),
@@ -1578,7 +1582,7 @@ fn sidebar_json(store: &Store) -> String {
 }
 
 /// The scheduled section that sits directly under today's blocks. Absent entirely when nothing is due.
-fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
+fn agenda_rows(agenda: &[AgendaRow], theme: &str) -> Vec<Row> {
     if agenda.is_empty() {
         return Vec::new();
     }
@@ -1603,7 +1607,7 @@ fn agenda_rows(agenda: &[AgendaRow]) -> Vec<Row> {
         date: entry.block.scheduled_date.clone().unwrap_or_default(),
         block_id: entry.block.id as i32,
         depth: 0,
-        html: markdown::to_html(&entry.block.content),
+        html: markdown::to_html(&entry.block.content, ink(theme)),
         text: entry.block.content.clone(),
         marker: entry.block.marker,
         scheduled: entry.block.scheduled_date.clone(),
@@ -1716,7 +1720,7 @@ mod tests {
             overdue: true,
         }];
 
-        let rows = agenda_rows(&agenda);
+        let rows = agenda_rows(&agenda, "light");
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].kind, Kind::AgendaHeader);
@@ -1729,7 +1733,7 @@ mod tests {
 
     #[test]
     fn nothing_scheduled_means_no_section_at_all() {
-        assert!(agenda_rows(&[]).is_empty());
+        assert!(agenda_rows(&[], "light").is_empty());
     }
 
     #[test]

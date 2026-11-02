@@ -230,14 +230,17 @@ pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
 ///
 /// Every character of the note is escaped, so a block that contains markup shows that markup instead of
 /// becoming it.
-pub fn to_html(text: &str) -> String {
-    render(text, false, None, None)
+pub fn to_html(text: &str, colours: &Ink) -> String {
+    render(text, false, Some(colours), None)
 }
 
-/// The colours a rendered fence uses. Passed in rather than owned here: this module knows what a token
-/// *is*, the view knows what colour it should be, and Qt's rich text takes colours inline only.
+/// The colours the rendered HTML uses: a fence's tokens, and links. Passed in rather than owned here —
+/// this module knows what a token *is*, the view knows what colour it should be, and Qt's rich text takes
+/// colours inline only.
 #[derive(Clone, Copy, Debug)]
-pub struct CodeColours<'a> {
+pub struct Ink<'a> {
+    /// Explicit, because Qt's own link colour is a stock blue that matches no theme.
+    pub link: &'a str,
     pub keyword: &'a str,
     pub string: &'a str,
     pub comment: &'a str,
@@ -246,18 +249,18 @@ pub struct CodeColours<'a> {
 
 /// The same rendering for a block that is not being edited: line breaks are kept, so a fence stays a
 /// block of code instead of collapsing into one line, and a fence whose language is known is coloured.
-pub fn to_html_block(text: &str, colours: &CodeColours) -> String {
+pub fn to_html_block(text: &str, colours: &Ink) -> String {
     render(text, true, Some(colours), None)
 }
 
 /// The same rendering with one range picked out behind it — what a search result shows so you can see
 /// why it matched. The range is marked where the text is escaped, not by cutting the string first: a
 /// match inside a `[[link]]` must not split it into two unclosed halves.
-pub fn to_html_marked(text: &str, mark: (usize, usize)) -> String {
-    render(text, false, None, Some(mark))
+pub fn to_html_marked(text: &str, mark: (usize, usize), colours: &Ink) -> String {
+    render(text, false, Some(colours), Some(mark))
 }
 
-fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>, mark: Option<(usize, usize)>) -> String {
+fn render(text: &str, keep_lines: bool, colours: Option<&Ink>, mark: Option<(usize, usize)>) -> String {
     let scan = scan(text);
     let mut html = String::new();
     let mut cursor = 0;
@@ -271,7 +274,7 @@ fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>, mark: Opt
                 .links
                 .iter()
                 .find(|link| link.start <= span.start && span.end <= link.end);
-            open_tags(&mut html, span.style, href);
+            open_tags(&mut html, span.style, href, colours);
             let language = fence_language(&scan, span, colours);
             match (language, colours) {
                 (Some(language), Some(colours)) => {
@@ -309,7 +312,7 @@ fn render(text: &str, keep_lines: bool, colours: Option<&CodeColours>, mark: Opt
 }
 
 /// The language a code span belongs to, when it sits inside a fence whose language is known.
-fn fence_language(scan: &Scan, span: &Span, colours: Option<&CodeColours>) -> Option<code::Language> {
+fn fence_language(scan: &Scan, span: &Span, colours: Option<&Ink>) -> Option<code::Language> {
     if colours.is_none() || !span.style.contains(Style::CODE) {
         return None;
     }
@@ -322,7 +325,7 @@ fn fence_language(scan: &Scan, span: &Span, colours: Option<&CodeColours>) -> Op
 }
 
 /// One fence line, its tokens coloured and the rest left as it came.
-fn write_code(html: &mut String, code: &str, language: code::Language, colours: &CodeColours) {
+fn write_code(html: &mut String, code: &str, language: code::Language, colours: &Ink) {
     let mut cursor = 0;
     for token in code::tokens(code, language) {
         if token.start > cursor {
@@ -346,8 +349,10 @@ fn write_code(html: &mut String, code: &str, language: code::Language, colours: 
     }
 }
 
-fn open_tags(html: &mut String, style: Style, href: Option<&LinkRef>) {
+fn open_tags(html: &mut String, style: Style, href: Option<&LinkRef>, colours: Option<&Ink>) {
     if style.contains(Style::LINK) {
+        // The href first, then the colour: Qt would draw an anchor in the palette's stock link blue,
+        // which matches neither theme.
         html.push_str("<a href=\"");
         match href {
             // A page link and a tag both name a page, so one scheme covers them.
@@ -358,7 +363,13 @@ fn open_tags(html: &mut String, style: Style, href: Option<&LinkRef>) {
             Some(link) => escape_into(html, &link.target, false),
             None => {}
         }
-        html.push_str("\">");
+        html.push('"');
+        if let Some(colours) = colours {
+            html.push_str(" style=\"color:");
+            html.push_str(colours.link);
+            html.push('"');
+        }
+        html.push('>');
     }
     if style.contains(Style::BOLD) || style.contains(Style::HEADING) {
         html.push_str("<b>");
@@ -699,7 +710,8 @@ fn find(text: &str, from: usize, to: usize, needle: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
-    const INK: CodeColours = CodeColours {
+    const INK: Ink = Ink {
+        link: "#l",
         keyword: "#k",
         string: "#s",
         comment: "#c",
@@ -928,36 +940,37 @@ mod tests {
     #[test]
     fn html_drops_the_marks_and_keeps_the_styling() {
         assert_eq!(
-            to_html("call the **plumber** before `noon`"),
+            to_html("call the **plumber** before `noon`", &INK),
             "call the <b>plumber</b> before <code>noon</code>"
         );
-        assert_eq!(to_html("## Plan"), "<b>Plan</b>");
-        assert_eq!(to_html("- milk"), "milk");
-        assert_eq!(to_html("> remember"), "<i>remember</i>");
+        assert_eq!(to_html("## Plan", &INK), "<b>Plan</b>");
+        assert_eq!(to_html("- milk", &INK), "milk");
+        assert_eq!(to_html("> remember", &INK), "<i>remember</i>");
     }
 
     #[test]
     fn html_links_pages_tags_and_urls() {
         assert_eq!(
-            to_html("see [[My Project]] and #idea"),
+            to_html("see [[My Project]] and #idea", &INK),
             // A tag keeps its `#`: that is how it reads, and dropping it would make the summary lie.
-            "see <a href=\"page:My Project\">My Project</a> and <a href=\"page:idea\">#idea</a>"
+            "see <a href=\"page:My Project\" style=\"color:#l\">My Project</a> and \
+             <a href=\"page:idea\" style=\"color:#l\">#idea</a>"
         );
         assert_eq!(
-            to_html("[the docs](https://example.com/x)"),
-            "<a href=\"https://example.com/x\">the docs</a>"
+            to_html("[the docs](https://example.com/x)", &INK),
+            "<a href=\"https://example.com/x\" style=\"color:#l\">the docs</a>"
         );
     }
 
     #[test]
     fn html_escapes_everything_the_note_says() {
         assert_eq!(
-            to_html("<img src=x onerror=\"alert('hi')\">"),
+            to_html("<img src=x onerror=\"alert('hi')\">", &INK),
             "&lt;img src=x onerror=&quot;alert(&#39;hi&#39;)&quot;&gt;"
         );
         assert_eq!(
-            to_html("[[a\"b]]"),
-            "<a href=\"page:a&quot;b\">a&quot;b</a>"
+            to_html("[[a\"b]]", &INK),
+            "<a href=\"page:a&quot;b\" style=\"color:#l\">a&quot;b</a>"
         );
     }
 
@@ -1022,7 +1035,7 @@ mod tests {
         assert_eq!(html, "<code>graph TD</code><br><code>  A --&gt; B</code>");
         assert_eq!(to_html_block("first\nsecond", &INK), "first<br>second");
         assert_eq!(
-            to_html("first\nsecond"),
+            to_html("first\nsecond", &INK),
             "first second",
             "a summary stays one line"
         );
@@ -1062,9 +1075,12 @@ mod tests {
     fn a_marked_range_is_picked_out_without_breaking_the_markup() {
         // The match sits inside a link: cutting the string first would leave "[[", "]]" unpaired and the
         // link would not be a link.
-        let html = to_html_marked("see [[My Project]] now", (6, 16));
+        let html = to_html_marked("see [[My Project]] now", (6, 16), &INK);
 
-        assert!(html.contains("<a href=\"page:My Project\">"), "link broke: {html}");
+        assert!(
+            html.contains("<a href=\"page:My Project\" style=\"color:#l\">"),
+            "link broke: {html}"
+        );
         assert!(
             html.contains("<span style=\"background-color:#f3e6c8\">My Project</span>"),
             "mark missing: {html}"
@@ -1073,6 +1089,6 @@ mod tests {
 
     #[test]
     fn html_keeps_a_multi_line_block_on_one_line() {
-        assert_eq!(to_html("first\nsecond"), "first second");
+        assert_eq!(to_html("first\nsecond", &INK), "first second");
     }
 }

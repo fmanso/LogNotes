@@ -106,18 +106,18 @@ void lognotes_settle() {
         loop.exec();
     }
 
-    // Longer than the 250 ms debounce, so the save a keystroke scheduled has had its chance to run before
-    // "nothing has changed" is taken to mean "settled".
+    // Just longer than the 250 ms debounce, so the save a keystroke scheduled has had its chance to run
+    // before "nothing has changed" is taken to mean "settled".
     {
         QEventLoop loop;
-        QTimer::singleShot(350, &loop, &QEventLoop::quit);
+        QTimer::singleShot(280, &loop, &QEventLoop::quit);
         loop.exec();
     }
 
     QVariant last = model->property("revision");
-    for (int tick = 0; tick < 60; ++tick) {
+    for (int tick = 0; tick < 80; ++tick) {
         QEventLoop loop;
-        QTimer::singleShot(80, &loop, &QEventLoop::quit);
+        QTimer::singleShot(60, &loop, &QEventLoop::quit);
         loop.exec();
         const QVariant now = model->property("revision");
         if (tick > 0 && now == last) {

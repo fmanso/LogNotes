@@ -273,6 +273,9 @@ with the command's effect and never types markdown into the block, and each comm
   the page's own colours. The Pages popup and the date picker are cream panels with a hairline border and a
   tinted hover row, because the control style's default chrome is dark and the text drawn on it was
   `#242424` on `#2a2a2a` — a page list you could not read.
+- **Links carry the theme's accent, inline.** Qt draws an anchor in the palette's stock link blue, which
+  belongs to neither theme — harsh on a dark page, foreign on a cream one. Every rendered anchor therefore
+  carries `style="color:…"` from the same palette as the fences, and keeps its underline as the affordance.
 - **Code fences are coloured by the view's palette.** The four colours live in `CODE_COLOURS` in the bridge
   and are handed to `to_html_block`; core decides what a token is, the view decides what it looks like. A
   fence whose language nobody knows renders as plain code.
@@ -317,8 +320,17 @@ broken database can never look like an empty journal.
 The window can be driven without a person at the keyboard, which is how its input handling gets checked:
 
 ```
-cargo run -p lognotes-qt --features driver -- --livetest
+make livetest      # build and drive the window, screenshots in $TMPDIR/lognotes-livetest
+make test          # every unit test
+make build         # the app, debug
+make release       # the app, release
+make run           # the app itself, on your display
 ```
+
+The Makefile exists for two reasons: every build runs in its own cgroup slice with a memory cap, because
+a cargo build inside the desktop's own scope once got the whole session killed by oomd; and with that cap
+in place it also runs with six jobs, which took the driven run from about three and a half minutes to
+one. `make run` is the exception — it is the app you are looking at, so it stays in your session.
 
 It writes to a throwaway database under `$TMPDIR/lognotes-livetest`, loads the same `main.qml` the app
 loads, and drives it through the real input path: typing, Enter, Tab, Shift+Tab, Ctrl+Z, a mouse click on
