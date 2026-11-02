@@ -29,7 +29,7 @@ fn pages_rank_exact_then_prefix_then_anywhere() {
 }
 
 #[test]
-fn a_page_search_is_capped_and_excludes_journals() {
+fn a_page_search_is_capped() {
     let mut store = store();
     for index in 0..6 {
         store.ensure_page(&format!("note {index}")).unwrap();
@@ -40,6 +40,18 @@ fn a_page_search_is_capped_and_excludes_journals() {
 
     assert_eq!(found.pages.len(), 4, "the list is capped, not the index");
     assert!(found.pages.iter().all(|page| page.name.starts_with("note")));
+}
+
+#[test]
+fn a_written_day_is_found_by_its_date() {
+    let mut store = store();
+    store.ensure_journal_page("2026-04-13").unwrap();
+    store.ensure_page("notes").unwrap();
+
+    let found = store.search("2026-04", 5, 10).unwrap();
+    let names: Vec<&str> = found.pages.iter().map(|page| page.name.as_str()).collect();
+
+    assert_eq!(names, ["2026-04-13"], "a date is a name, so the switcher can find it");
 }
 
 #[test]

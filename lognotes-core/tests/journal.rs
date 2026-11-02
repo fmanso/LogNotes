@@ -122,6 +122,70 @@ fn deleting_a_subtree_is_one_undo_step() {
 }
 
 #[test]
+fn a_marker_and_the_text_it_replaced_undo_as_one_step() {
+    let mut store = store();
+    let page = store.ensure_journal_page("2026-04-13").unwrap();
+    let block = store.insert_block(page, None, "call the plumber /todo").unwrap();
+
+    store
+        .set_marker_with_content(block, Some(Marker::Todo), "call the plumber")
+        .unwrap();
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.content, "call the plumber");
+    assert_eq!(row.marker, Some(Marker::Todo));
+
+    assert!(store.undo().unwrap());
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.content, "call the plumber /todo", "one step takes back both halves");
+    assert_eq!(row.marker, None);
+
+    assert!(store.redo().unwrap());
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.content, "call the plumber");
+    assert_eq!(row.marker, Some(Marker::Todo));
+}
+
+#[test]
+fn a_scheduled_date_and_its_text_undo_as_one_step() {
+    let mut store = store();
+    let page = store.ensure_journal_page("2026-04-13").unwrap();
+    let block = store.insert_block(page, None, "order filament /scheduled").unwrap();
+
+    store
+        .set_scheduled_with_content(block, Some("2026-04-14"), "order filament")
+        .unwrap();
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.content, "order filament");
+    assert_eq!(row.scheduled_date.as_deref(), Some("2026-04-14"));
+    assert_eq!(row.marker, Some(Marker::Todo), "a date on an untasked block still marks it TODO");
+
+    assert!(store.undo().unwrap());
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.content, "order filament /scheduled");
+    assert_eq!(row.scheduled_date, None);
+    assert_eq!(row.marker, None);
+}
+
+#[test]
+fn clearing_a_date_with_its_text_is_one_step_too() {
+    let mut store = store();
+    let page = store.ensure_journal_page("2026-04-13").unwrap();
+    let block = store.insert_block(page, None, "order filament").unwrap();
+    store.set_scheduled(block, Some("2026-04-14")).unwrap();
+    store.set_marker_with_content(block, Some(Marker::Doing), "order filament /clear").unwrap();
+
+    store.set_scheduled_with_content(block, None, "order filament").unwrap();
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.scheduled_date, None);
+    assert_eq!(row.marker, Some(Marker::Doing), "clearing the date leaves the marker alone");
+
+    assert!(store.undo().unwrap());
+    let row = &store.page_blocks(page).unwrap()[0];
+    assert_eq!(row.scheduled_date.as_deref(), Some("2026-04-14"));
+    assert_eq!(row.content, "order filament /clear");
+}
+
+#[test]
 fn split_is_a_single_undo_step() {
     let mut store = store();
     let page = store.ensure_journal_page("2026-04-13").unwrap();

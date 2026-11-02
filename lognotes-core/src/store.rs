@@ -189,11 +189,12 @@ impl Store {
         ensure_page_on(&self.conn, name)
     }
 
-    /// Every named page, for the page switcher. Journal days are not pages you navigate to.
+    /// Every page, for the page switcher — written journal days included, because a date is a name a
+    /// block can link to. A day nobody wrote has no row and so cannot be found this way: scrolling the
+    /// column is what reaches it.
     pub fn pages(&self) -> Result<Vec<Page>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, name_key, kind, journal_date FROM page
-             WHERE kind = 'page' ORDER BY name_key",
+            "SELECT id, name, name_key, kind, journal_date FROM page ORDER BY name_key",
         )?;
         let pages = stmt
             .query_map([], read_page)?
@@ -216,17 +217,7 @@ impl Store {
 
     /// Find or create the journal page for `date`.
     pub fn ensure_journal_page(&mut self, date: &str) -> Result<i64> {
-        ensure_date(date)?;
-        if let Some(page) = self.journal_page(date)? {
-            return Ok(page.id);
-        }
-        let now = now();
-        self.conn.execute(
-            "INSERT INTO page (name, name_key, kind, journal_date, created_at, updated_at)
-             VALUES (?1, ?1, 'journal', ?1, ?2, ?2)",
-            params![date, now],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        ensure_journal_page_on(&self.conn, date)
     }
 
     // ----- commands ----------------------------------------------------------------------------
@@ -385,6 +376,24 @@ impl Store {
         self.exec(Action::SetMarker { block_id, marker })
     }
 
+    /// Set a block's marker and its text together, as one undo step: what a slash command does when it
+    /// takes the token it replaced out of the text and marks the block in the same gesture. Two commands
+    /// would cost two presses of undo for one thing the user did.
+    pub fn set_marker_with_content(
+        &mut self,
+        block_id: i64,
+        marker: Option<Marker>,
+        content: &str,
+    ) -> Result<()> {
+        self.exec(Action::Composite(vec![
+            Action::SetContent {
+                block_id,
+                content: content.to_string(),
+            },
+            Action::SetMarker { block_id, marker },
+        ]))
+    }
+
     /// Schedule a block for `date`, or clear the date with `None`.
     ///
     /// Scheduling a block that is not a task also marks it TODO: the agenda lists tasks, so a date on an
@@ -394,8 +403,33 @@ impl Store {
         if let Some(date) = date {
             ensure_date(date)?;
         }
-        let record = block_record(&self.conn, block_id)?;
+        let actions = self.schedule_actions(block_id, date)?;
+        self.exec(Action::Composite(actions))
+    }
 
+    /// The same for a scheduled date plus the text the command rewrote, so one undo takes back the whole
+    /// slash command rather than the two halves of it.
+    pub fn set_scheduled_with_content(
+        &mut self,
+        block_id: i64,
+        date: Option<&str>,
+        content: &str,
+    ) -> Result<()> {
+        if let Some(date) = date {
+            ensure_date(date)?;
+        }
+        let mut actions = vec![Action::SetContent {
+            block_id,
+            content: content.to_string(),
+        }];
+        actions.extend(self.schedule_actions(block_id, date)?);
+        self.exec(Action::Composite(actions))
+    }
+
+    /// The writes a scheduled date implies, in order: the date itself, then the TODO that makes the block
+    /// visible to the agenda.
+    fn schedule_actions(&self, block_id: i64, date: Option<&str>) -> Result<Vec<Action>> {
+        let record = block_record(&self.conn, block_id)?;
         let mut actions = vec![Action::SetScheduled {
             block_id,
             date: date.map(str::to_string),
@@ -406,12 +440,7 @@ impl Store {
                 marker: Some(Marker::first()),
             });
         }
-
-        if actions.len() == 1 {
-            self.exec(actions.remove(0))
-        } else {
-            self.exec(Action::Composite(actions))
-        }
+        Ok(actions)
     }
 
     /// Everything due: marked `TODO`/`DOING`, with a date up to `horizon_days` ahead. Past dates stay,
@@ -491,7 +520,7 @@ impl Store {
 
         let mut stmt = self.conn.prepare(
             "SELECT id, name, name_key, kind, journal_date FROM page
-             WHERE kind = 'page' AND instr(name_key, ?1) > 0
+             WHERE instr(name_key, ?1) > 0
              ORDER BY CASE WHEN name_key = ?1 THEN 0
                            WHEN instr(name_key, ?1) = 1 THEN 1
                            ELSE 2 END,
@@ -836,6 +865,8 @@ fn ensure_page_on(conn: &Connection, name: &str) -> Result<i64> {
     }
     let key = trimmed.to_lowercase();
 
+    // An existing row wins, whatever its kind: a page that was already named like a date keeps its
+    // blocks, and no link is silently re-pointed at a different page.
     if let Some(id) = conn
         .query_row("SELECT id FROM page WHERE name_key = ?1", [&key], |row| {
             row.get::<_, i64>(0)
@@ -845,11 +876,37 @@ fn ensure_page_on(conn: &Connection, name: &str) -> Result<i64> {
         return Ok(id);
     }
 
+    // A date is a name for a journal day: `[[2025-11-02]]` means that day, not a page beside the
+    // calendar that merely looks like it. One rule here, and links, `open_page` and the placeholder's
+    // materialise path all land on the real day.
+    if ensure_date(trimmed).is_ok() {
+        return ensure_journal_page_on(conn, trimmed);
+    }
+
     let now = now();
     conn.execute(
         "INSERT INTO page (name, name_key, kind, journal_date, created_at, updated_at)
          VALUES (?1, ?2, 'page', NULL, ?3, ?3)",
         params![trimmed, key, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn ensure_journal_page_on(conn: &Connection, date: &str) -> Result<i64> {
+    ensure_date(date)?;
+    if let Some(id) = conn
+        .query_row("SELECT id FROM page WHERE journal_date = ?1", [date], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let now = now();
+    conn.execute(
+        "INSERT INTO page (name, name_key, kind, journal_date, created_at, updated_at)
+         VALUES (?1, ?1, 'journal', ?1, ?2, ?2)",
+        params![date, now],
     )?;
     Ok(conn.last_insert_rowid())
 }

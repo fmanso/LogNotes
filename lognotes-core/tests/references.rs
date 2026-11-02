@@ -1,6 +1,6 @@
 //! Links, tags and references: the derived rows must follow the text, never lead it.
 
-use lognotes_core::{Marker, ReferenceKind, Store};
+use lognotes_core::{Marker, PageKind, ReferenceKind, Store};
 
 fn store() -> Store {
     Store::open_in_memory().expect("in-memory store")
@@ -100,13 +100,61 @@ fn deleting_the_block_removes_its_references() {
 }
 
 #[test]
-fn named_pages_are_listed_for_the_switcher_but_journals_are_not() {
+fn written_days_are_listed_for_the_switcher_alongside_named_pages() {
     let mut store = store();
     store.ensure_journal_page("2026-04-13").unwrap();
     write(&mut store, "2026-04-13", "see [[My Project]] and #idea");
 
     let names: Vec<String> = store.pages().unwrap().into_iter().map(|page| page.name).collect();
-    assert_eq!(names, ["idea", "My Project"]);
+    // A date is a name a block can link to, so it is a name the switcher has to offer; it sorts where
+    // its digits sort, before the word-like names.
+    assert_eq!(names, ["2026-04-13", "idea", "My Project"]);
+}
+
+#[test]
+fn a_day_nobody_wrote_is_not_in_the_switcher() {
+    let mut store = store();
+    store.ensure_journal_page("2026-04-13").unwrap();
+
+    let names: Vec<String> = store.pages().unwrap().into_iter().map(|page| page.name).collect();
+
+    assert_eq!(names, ["2026-04-13"], "scrolling is what reaches a day that was never written");
+}
+
+#[test]
+fn a_date_link_names_the_journal_day() {
+    let mut store = store();
+    let (_, block) = write(&mut store, "2026-04-13", "see [[2026-04-14]]");
+
+    let day = store.journal_page("2026-04-14").unwrap().expect("the day was created");
+    assert_eq!(day.kind, PageKind::Journal);
+    // The same row a name lookup finds: no look-alike page beside the calendar.
+    assert_eq!(store.page_by_name("2026-04-14").unwrap().unwrap().id, day.id);
+
+    let references = store.references(day.id).unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].block.id, block);
+    assert_eq!(references[0].journal_date.as_deref(), Some("2026-04-13"));
+}
+
+#[test]
+fn opening_a_date_by_name_reaches_the_same_day() {
+    let mut store = store();
+    let day = store.ensure_journal_page("2026-04-14").unwrap();
+
+    assert_eq!(store.ensure_page("2026-04-14").unwrap(), day);
+    assert_eq!(store.ensure_page(" 2026-04-14 ").unwrap(), day, "trimmed, like any name");
+}
+
+#[test]
+fn something_that_only_looks_like_a_date_stays_a_page() {
+    let mut store = store();
+
+    // chrono parses a loose "2026-4-3"; a name that does not round-trip is not a day.
+    for name in ["2026-4-3", "2026-04-31", "13-04-2026", "2026-04-14-extra"] {
+        let created = store.ensure_page(name).unwrap();
+        assert_eq!(store.page(created).unwrap().kind, PageKind::Page, "{name}");
+    }
 }
 
 #[test]
