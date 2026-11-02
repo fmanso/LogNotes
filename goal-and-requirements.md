@@ -53,10 +53,20 @@ application small enough to fully own and trim.
   listed is inferred from "if marked as DONE it should disappear" — unconfirmed.)*
 - **A link goes where it points.** A click on `[[page]]` or `#tag` in a block opens that page, creating it if
   nothing has written it yet, so the click always lands somewhere you can type.
+- **A date names its day.** `[[2025-11-02]]` is a link to that journal day, not a look-alike page beside the
+  calendar: clicking it opens the day, and the quick switcher finds written days by date. A day opened that
+  way shows as a page — its blocks and their linked references — while the agenda stays on today's place in
+  the column.
+- **Everything a block can do, from the block.** Typing `/` opens a command menu beside the caret: set the
+  task marker, clear it, schedule the block through the calendar, clear that date, write a link to today,
+  tomorrow or a day you pick, or insert the current time. Typing narrows the list, `Enter` or a click runs
+  one, `Esc` leaves the text as typed — and a command changes the block, never the words in it, so `/todo`
+  leaves a task rather than the letters. Each one is a single undo.
 - **A shell you can work from.** A bar with a search field, a way back to the journal, and a light/dark theme
   switch that is remembered; a sidebar of the pages you starred and the ones you opened most recently.
-- **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names first, then blocks whose
-  text matches, as you type. `Enter` opens the page, or puts the caret on the match in the block it found.
+- **Search.** `Ctrl+K` opens a quick switcher over the whole graph: page names and written journal days
+  first, then blocks whose text matches, as you type. `Enter` opens the page or day, or puts the caret on the
+  match in the block it found.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the
   app works fully offline with no account.
 

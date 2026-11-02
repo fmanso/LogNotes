@@ -110,7 +110,9 @@ ever visible.
 | `split_block(block, offset)` | One command for Enter mid-block: keeps the text before `offset`, moves the rest into a new sibling. Splitting and inserting separately would show up as two undo steps. |
 | `cycle_marker(block)` | Walks the marker cycle none → TODO → DOING → DONE → none. It lives here, not in the view, so a checkbox, a shortcut and the agenda cannot disagree about the order. |
 | `set_marker(block, marker)` | Sets or clears the marker directly — what the agenda's checkbox uses to mean "done", as opposed to "next marker along". |
+| `set_marker_with_content(block, marker, text)` | The marker and a rewritten text, as one undo step: what a slash command does when it takes the token it replaced out of the text at the same time. |
 | `set_scheduled(block, date)` | Sets or clears the scheduled date. Scheduling a block that is not a task also marks it TODO, in the same composite action, because the agenda lists tasks and a date on an untasked block would silently never appear. |
+| `set_scheduled_with_content(block, date, text)` | The same date rule with a rewritten text, again as one step. |
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
 | `move(block, page, after)` | Moves a block (with its subtree) between pages or positions. |
 | `delete_block(block)` | Removes the block and its subtree. |
@@ -129,14 +131,14 @@ cursor is worse than one that lingers.
 | --- | --- |
 | `page_by_name(name_key)` | Page row, or none. |
 | `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
-| `pages()` | Every `kind = 'page'` page, ordered by `name_key` — the page switcher's list. Journal days are excluded: they are reached by scrolling, not by name. |
+| `pages()` | Every page, ordered by `name_key` — the page switcher's list. Written journal days are included, because a date is a name a block can link to; a day nobody wrote has no row, and scrolling the column is what reaches it. |
 | `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
 | `pages_by_favourite()` | The starred pages, by name — the sidebar's Favourites. Journal days are never among them. |
 | `recent_pages(limit)` | Named pages ordered by `visit_order`, newest first — the sidebar's Recent. Ordering is exact because it is a counter, not a timestamp. |
 | `is_favourite(page)` | Whether a page is starred, for the star in its header. |
 | `setting(key)` / `set_setting(key, value)` | The app's own settings, `theme` today. A missing key is `None`, not an error. |
-| `search(query, page_limit, block_limit)` | `SearchResults`: pages whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date and a window of its text around the match. |
+| `search(query, page_limit, block_limit)` | `SearchResults`: pages and written days whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date and a window of its text around the match. |
 | `page_of_block(block)` | The page a block belongs to — what the view needs to show a block a search found. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
@@ -156,6 +158,11 @@ it came from. `[[Page Name]]` and `#tag` are recognised; spans inside inline cod
 Two consequences worth stating: extraction *creates* the pages it names (a link is an assertion the page
 exists), while a plain mention matches only pages that already exist — prose never conjures a page. Pages
 created by extraction stay behind if the link is later removed, like journal pages created by typing.
+
+A name that is a strict `YYYY-MM-DD` date is not a page name but a journal day: extraction finds or creates
+that day's row instead (`ensure_page_on`), and the same lookup is what `open_page`, the placeholder's
+materialise path and the switcher use. A name that only *looks* like a date — `2026-4-3`, `2026-04-31` —
+stays an ordinary page, because `ensure_date` round-trips the string before accepting it.
 
 ## Ordering keys
 

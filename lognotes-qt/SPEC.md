@@ -39,7 +39,7 @@ the GUI thread never has an open handle to pass around — or to leak into a del
 
 ## Model rows
 
-`rowCount`/`data` expose one flat list, rebuilt wholesale from a snapshot. A row is one of three kinds,
+`rowCount`/`data` expose one flat list, rebuilt wholesale from a snapshot. A row is one of a few kinds,
 carried in the `kind` role:
 
 | kind | meaning |
@@ -49,13 +49,14 @@ carried in the `kind` role:
 | `placeholder` | The block an untouched day shows so the cursor has somewhere to land. `blockId` is `-1` and **nothing is written** until the first keystroke. |
 | `agenda-header` | The `Scheduled` heading, present only when something is due. |
 | `agenda-row` | A due block, spliced directly under today's blocks; carries the same `blockId`, so acting on it acts on the block. |
-| `page-header` | The name of the page being viewed. |
+| `page-header` | The name of the page being viewed. Carries `date` when that page *is* a journal day — a date is a name a block can link to — so the header renders as a day and the star stays hidden. |
 | `reference-header` / `reference-row` | `Linked References` and the blocks that link this page. |
 | `unlinked-header` / `unlinked-row` | The collapsed `Unlinked mentions (N)` group and its rows. |
 
 Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `scheduled`, `source`,
-`overdue`, `html`, `diagram`, `diagramError`. Dates stay ISO `YYYY-MM-DD` in the
-model and are formatted in QML — the core never learns a locale, and the view never parses a date.
+`overdue`, `html`, `diagram`, `diagramError`. `date` is a journal date, or the day a linked date named when
+the row is a `page-header`; either way it stays ISO `YYYY-MM-DD` in the model and is formatted in QML — the
+core never learns a locale, and the view never parses a date.
 
 Three more properties belong to the shell rather than to a row: `theme` ("light" or "dark", from the
 store's settings), `sidebar` (the two lists as `{"favourites": […], "recent": […]}`), and
@@ -75,9 +76,11 @@ materialises a day (`ensure_journal_page` + insert). This is a view-layer rule, 
 
 ## Two views
 
-The model shows either the journal column or one named page. `open_page(name)` / `show_journal()` set the
-mode, which is carried to the worker with every job so each snapshot is built for the view that asked for
-it: a page snapshot is its blocks plus `references(page)`; a journal snapshot is days plus the agenda.
+The model shows either the journal column or one page — a named page, or a journal day reached by its date.
+`open_page(name)` / `show_journal()` set the mode, which is carried to the worker with every job so each
+snapshot is built for the view that asked for it: a page snapshot is its blocks plus `references(page)`, and
+for a date that page is the journal day itself; a journal snapshot is days plus the agenda. So a day has two
+views — where it sits in the column, and its own page — and only the column carries the agenda.
 
 The page list for the switcher rides along with each snapshot as a JSON array (`page_names`), so opening the
 switcher costs no round trip. Switching views replaces every row, so QML sets `pendingViewFocus` and puts the
@@ -96,7 +99,9 @@ re-open after an error), `Run` (an optional command, then a fresh snapshot of th
 delivers results by queueing a closure back onto the object's thread, so model resets and property
 changes only ever happen on the GUI thread. Commands are `Update`, `Materialize`, `Submit`, `Indent`,
 `Outdent`, `Delete`, `Undo`, `Redo` — each a thin translation to exactly one core call, except `Submit`,
-which is a single command so that pressing Enter is a single undo step.
+which is a single command so that pressing Enter is a single undo step, and `SetMarkerWithContent` /
+`SetScheduledWithContent`, which exist for the same reason: a slash command's rewritten text and the state
+it set are one command, so one `Ctrl+Z` takes the whole command back.
 
 An empty `Run` (no command) is how `loadMore` asks for the next chunk: the bridge extends its own date
 list by `CHUNK_DAYS` (14) and asks for a snapshot of the larger window.
@@ -189,6 +194,32 @@ and it keeps the database path the only OS-specific location in the codebase.
   `Shift+Enter` still breaks a line anywhere, which is how the first line of a fence is started. `END` on a
   multi-line block stops at the end of the line, so anything that means "the end of the block" uses
   `Ctrl+End`.
+- **A slash opens the block's commands.** Typing `/` where it begins a word — start of the block or after
+a space, so `and/or` and a URL never trigger it — opens a menu beside the caret that filters as you type:
+`TODO`/`DOING`/`DONE`/`Remove status`, `Scheduled`/`Clear date`, `Today`/`Tomorrow`/`Pick a date`, `Time`.
+`Up`/`Down` move, `Enter` or a click runs one, `Esc` leaves the token as typed. Picking replaces the token
+with the command's effect and never types markdown into the block, and each command is one undo step.
+
+  Three things make it hold together. Its state lives on the window, not on a delegate, because every save
+  rebuilds the delegates; the popup takes no focus (`focus: false`) so keystrokes keep arriving in the
+  editor, whose key handler claims the navigation keys before their old meanings; and **saving is held for
+  as long as it is open** — the debounce does not restart — so the editor, and the caret rectangle the menu
+  hangs from, survives the menu's lifetime. Every exit writes what was typed: leaving the token resumes the
+  debounce, a page switch or another block runs an immediate write, and a dismissed token stays as text.
+  The token scan is in QML on purpose: `cursorPosition` and JS strings are both UTF-16, while core's offsets
+  are bytes, so scanning there avoids the conversion the raw/rendered caret already has to fight.
+- **A day page's header reads as a day.** A journal day opened by name (a `[[2025-11-02]]` link, or a date
+  hit in the switcher) is just a page row, so the page branch of the snapshot serves it unchanged — but its
+  header carries the day in the `date` role, which renders the column's own "Monday, November 2, 2026" and
+  hides the favourite star. No agenda there: the agenda belongs to today's place in the column, and a day
+  page shows the day's blocks and references only.
+- **The date picker has two purposes, one write.** `Ctrl+Shift+S` opens it to set a block's scheduled date;
+  the slash menu opens it to write the picked day into the text as a link, or (via `Scheduled`) to do the
+  former while also eating the token. The second case keeps the pending token on the window and defers the
+  text edit to *accept*, so the date and the rewritten text land as one command; `Cancel`/`Esc` writes the
+  token as it was typed, and `Clear` clears the date through the same composite. The dialog is opened on the
+  next turn (`Qt.callLater`) because a popup opened while the menu's overlay is still closing gets the focus
+  but not the keys.
 - **A link in an editor needs Ctrl.** Blocks are always in edit mode, so a plain click has to keep meaning
   "put the caret here". Ctrl+click resolves the character under the pointer through `link_at`, which
   rescans the *editor's* text rather than the stored one, so an unsaved link is clickable too. One
@@ -258,7 +289,8 @@ broken database can never look like an empty journal.
   visible, dimmed, instead of becoming a drawn bullet or a bar — they do disappear in the rendered form.
   Folding is likewise not implemented: every block renders expanded, and link autocompletion when typing
   `[[` does not exist yet. A diagram cannot be enlarged, and it is drawn in blocks only — a summary row
-  shows the fence as code, not as a picture.
+  shows the fence as code, not as a picture. The slash menu lists the commands the app has; code fences and
+  markdown marks are typed, not inserted.
 - Blocks cannot be reordered (only indented, outdented, created, edited, deleted).
 - The focus restoration is index-based; a keypress that changes the row count between snapshot and
   rebuild can land the caret one row off.
@@ -284,10 +316,17 @@ after Enter to prove no keystroke is eaten, typing ``` in a fresh block to start
 fence with plain Enter once it is open and checking the diagram it drew, a fence that does not parse and the
 one line it reports, opening the quick switcher with Ctrl+K to find a page and then a block, a python fence read back as
 coloured HTML, starring a page and reading the sidebar back, hiding the sidebar with Ctrl+B, switching
-the theme to dark and back, clicking a link in a block at rest and typing on the page it opened, and
-finally a close with a pending debounce. Each step is checked against the
+the theme to dark and back, clicking a link in a block at rest and typing on the page it opened, typing `/`
+to open the command menu and Enter to run what it highlights, narrowing it with another letter and reaching
+the next command with Down, Esc leaving the token as typed, `/scheduled` through the calendar and one
+Ctrl+Z taking its date and its text back together, and clicking the date link it wrote to open that day as a
+page — then finally a close with a pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
+
+The slash-command steps assume no row on purpose: a synthetic click lands unreliably under this compositor
+(a dozen earlier steps already fail that way on the base commit), so each one reads the store once and finds
+its block by content — "the block that holds today's link" — rather than by an index it cannot trust.
 
 Two harness lessons that cost a run each. `grabWindow()` races Qt's threaded render loop and can take the
 whole process down inside `QRhi::beginFrame`; run the harness with `QSG_RENDER_LOOP=basic`. And Qt Quick

@@ -99,6 +99,18 @@ answers with a full snapshot rather than a delta — at personal scale the diffe
 and it removes any chance of the view drifting from the store. The concrete model surface lives in
 `lognotes-qt`.
 
+**A date is a name for a journal day.** A link whose text is a strict `YYYY-MM-DD` date resolves to that
+day's journal page instead of creating a plain page beside the calendar — and so does opening that name, or
+finding it in the switcher. One rule in one place (`ensure_page_on`), because the alternative is a second
+kind of date-shaped page that looks like a day, sorts like a day, and holds none of it. The day's page row
+is the only row a date can mean; what a view draws for it is the view's business.
+
+**One user action is one undo step, however many rows it writes.** The store records a command's inverse
+rather than its writes, so a command that needs two mutations composes them into one entry (scheduling
+composes the date with the `TODO` it implies; a slash command composes the text it rewrote with the state
+it set). Undo walks what the user did, not what the code did — the reason the split, the delete, and the
+slash command each cost exactly one `Ctrl+Z`.
+
 **The tree reaches QML flattened.** Views bind to a flat row list carrying a depth field rather than a
 nested QObject tree: one model type serves the journal, a page, and the agenda, and QML renders a list
 with indentation instead of recursing.
@@ -116,6 +128,8 @@ not a view concern — so the same list can later appear elsewhere without reimp
 - `scheduled_date` is a calendar date in local time, never a timestamp with a timezone — "the 14th" means
   the 14th wherever the laptop is.
 - A block whose marker is `DONE` never appears in the scheduled section.
+- A name that is a strict `YYYY-MM-DD` date means that journal day, wherever the name came from.
+- A command that changes several rows lands as one undo step.
 - The scheduled section lists non-`DONE` blocks with a scheduled date up to 7 days ahead, and keeps past
   dates listed as overdue until they are marked `DONE`. *(The 7-day horizon and the overdue rule are
   unconfirmed inferences from the maker's wording, recorded the same way in `lognotes`.)*
