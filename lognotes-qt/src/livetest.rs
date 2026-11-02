@@ -5,7 +5,7 @@
 //! person gets. Screenshots land in `$TMPDIR/lognotes-livetest/shots/`.
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
-use lognotes_core::{BlockRow, Store};
+use lognotes_core::{BlockRow, Marker, Store};
 
 use crate::driver::{self, key, modifier};
 use crate::MAIN_QML;
@@ -637,6 +637,161 @@ pub fn run() -> ! {
         "the page a link opened takes a keystroke",
         on_page.iter().any(|block| block.contains('R')),
         format!("page blocks={on_page:?}"),
+    );
+
+    // ---- slash commands at block level --------------------------------------------------------
+    // Back in the journal column: the search steps above left the window on a page, and a slash command
+    // belongs to whatever block the caret is in, so start from the column the rest of the run is about.
+    driver::click_named(&QString::from("journalButton"), 0);
+    driver::wait_ms(1000);
+
+    // A keystroke only reaches a block if the caret is in one, and a click that lands nowhere is a
+    // property of this compositor rather than of the app, so retry instead of assuming one click.
+    for _ in 0..3 {
+        if driver::focus_name().to_string() == "blockEditor" {
+            break;
+        }
+        driver::click_block(0);
+        driver::wait_ms(400);
+    }
+
+    // Nothing below assumes a row: this scenario follows the app, reading the store once per step and
+    // finding what it looks for by content, because *which* block holds the caret is the view's
+    // business. Typing "/" opens the menu; Enter then picks the highlighted command rather than
+    // splitting the block, and the token does not survive it.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let todo_before = markers(&root)
+        .into_iter()
+        .filter(|marker| *marker == Some(Marker::Todo))
+        .count();
+    driver::type_text(&QString::from("/"));
+    driver::wait_ms(600);
+    shot("30-slash-menu");
+    check(
+        "typing a slash opens the command menu",
+        driver::visible(&QString::from("slashMenu")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(900);
+    shot("31-slash-todo");
+    let after_menu = blocks(&root);
+    let todos_now = markers(&root)
+        .into_iter()
+        .filter(|marker| *marker == Some(Marker::Todo))
+        .count();
+    check(
+        "a slash command marks the block and eats the token it replaced",
+        todos_now == todo_before + 1 && !after_menu.iter().any(|text| text.contains('/')),
+        format!("blocks={after_menu:?} todos {todo_before} -> {todos_now}"),
+    );
+
+    // Typing after the "/" narrows the list; Down moves the highlight to today's date command, which
+    // writes a link to the journal day instead of setting anything on the block.
+    let today_link = format!("[[{today}]]");
+    driver::type_text(&QString::from("/t"));
+    driver::wait_ms(500);
+    shot("32-slash-filtered");
+    check(
+        "the menu follows what is typed after the slash",
+        driver::visible(&QString::from("slashMenu")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+    driver::press_key(key::DOWN, modifier::NONE);
+    driver::wait_ms(200);
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(900);
+    let after_date = blocks(&root);
+    let target = after_date.iter().position(|text| text.contains(&today_link));
+    check(
+        "down then enter picks the next match, and a date command writes a link to the day",
+        target.is_some(),
+        format!("blocks={after_date:?}"),
+    );
+    let target = target.expect("the block the date command wrote into");
+
+    // Esc is the way out that changes nothing: the token stays as ordinary text, and is written.
+    driver::press_key(key::END, modifier::CTRL);
+    driver::wait_ms(200);
+    driver::type_text(&QString::from("/tod"));
+    driver::wait_ms(500);
+    driver::press_key(key::ESCAPE, modifier::NONE);
+    driver::wait_ms(900);
+    let after_esc = blocks(&root);
+    check(
+        "esc leaves the token as typed instead of running a command",
+        after_esc
+            .get(target)
+            .map(|text| text.contains(&today_link) && text.ends_with("/tod"))
+            .unwrap_or(false),
+        format!("blocks={after_esc:?}"),
+    );
+
+    // The scheduled command goes through the same calendar Ctrl+Shift+S opens — Right, then Enter, is
+    // tomorrow — and the date plus the token's removal are one write: one Ctrl+Z takes the whole
+    // command back, date and text together. Saving is held while the menu is open, so the text the
+    // undo returns to is the block as it stood before the token was typed.
+    let text_before = after_esc.get(target).cloned().unwrap_or_default();
+    let dates_before = scheduled(&root);
+    let tomorrow = (chrono::Local::now() + chrono::Days::new(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    driver::type_text(&QString::from(" /sch"));
+    driver::wait_ms(500);
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(800);
+    shot("34-slash-scheduled");
+    driver::press_key(key::RIGHT, modifier::NONE);
+    driver::wait_ms(300);
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::wait_ms(900);
+    let after_scheduled = blocks(&root);
+    let dates = scheduled(&root);
+    check(
+        "the scheduled command opens the calendar, and accepting it dates the block",
+        dates.get(target) == Some(&Some(tomorrow.clone()))
+            && after_scheduled
+                .get(target)
+                .map(|text| !text.contains("/sch"))
+                .unwrap_or(false),
+        format!("scheduled={dates:?} blocks={after_scheduled:?}"),
+    );
+
+    let dated = after_scheduled.get(target).cloned().unwrap_or_default();
+    driver::press_key(key::Z, modifier::CTRL);
+    driver::wait_ms(900);
+    let after_undo = blocks(&root);
+    let dates_undone = scheduled(&root);
+    check(
+        "one undo takes back the command's date and the token it replaced",
+        after_undo.get(target) == Some(&text_before)
+            && after_undo.get(target) != Some(&dated)
+            && dates_undone.get(target) == dates_before.get(target),
+        format!(
+            "blocks={after_undo:?} scheduled={dates_undone:?} was {dates_before:?}"
+        ),
+    );
+    driver::press_key(key::Z, modifier::CTRL | modifier::SHIFT);
+    driver::wait_ms(900);
+
+    // A date link really is a link to the day: clicking it opens that day as a page, under the same day
+    // heading the column uses and without the star a named page carries. Down leaves the block first,
+    // so it is rendered and its link can be clicked.
+    driver::press_key(key::DOWN, modifier::NONE);
+    driver::wait_ms(500);
+    check(
+        "the date link in a block at rest can be clicked",
+        driver::click_link(target as i32),
+        format!("row {target} of {:?}", blocks(&root)),
+    );
+    driver::wait_ms(1000);
+    shot("33-day-page");
+    let heading = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+    let shown = driver::named_text(&QString::from("pageHeading"), 0).to_string();
+    check(
+        "clicking a date link opens that day as a page under its day heading",
+        shown == heading && !driver::visible(&QString::from("favouriteStar")),
+        format!("heading={shown:?} expected {heading:?}"),
     );
 
     // Back to the journal for the close test.

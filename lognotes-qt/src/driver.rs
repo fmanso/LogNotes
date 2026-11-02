@@ -70,12 +70,15 @@ pub mod key {
     pub const BACKSPACE: i32 = 0x0100_0003;
     pub const UP: i32 = 0x0100_0013;
     pub const DOWN: i32 = 0x0100_0015;
+    pub const LEFT: i32 = 0x0100_0012;
+    pub const RIGHT: i32 = 0x0100_0014;
     pub const Z: i32 = 0x5A;
     // Qt::Key_Home/Key_End sit at 0x01000010/0x01000011 — 0x01000007 is Delete.
     pub const END: i32 = 0x0100_0011;
     pub const S: i32 = 0x53;
     pub const K: i32 = 0x4B;
     pub const B: i32 = 0x42;
+    pub const ESCAPE: i32 = 0x0100_0000;
 }
 
 pub mod modifier {
