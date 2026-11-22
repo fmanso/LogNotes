@@ -579,7 +579,19 @@ pub fn run() -> ! {
             && fenced.iter().any(|block| block.contains("```mermaid") && block.contains('\n')),
         format!("blocks={:?}", fenced),
     );
-    let diagram = driver::named_text(&QString::from("diagram"), 0).to_string();
+    // The save that carries the finished fence runs on the worker thread; on a slow runner the frame
+    // photographed above can still be the one from before it landed. Wait for the model to answer
+    // before judging whether the diagram was drawn.
+    let mut diagram = String::new();
+    let mut diagram_error = String::new();
+    for _ in 0..50 {
+        diagram = driver::named_text(&QString::from("diagram"), 0).to_string();
+        diagram_error = driver::named_text(&QString::from("diagramError"), 0).to_string();
+        if !diagram.is_empty() || !diagram_error.is_empty() {
+            break;
+        }
+        driver::wait_ms(100);
+    }
     let drawn = diagram
         .strip_prefix("file://")
         .map(|path| std::path::Path::new(path).exists())
@@ -587,7 +599,7 @@ pub fn run() -> ! {
     check(
         "the mermaid fence drew a diagram next to itself",
         drawn,
-        format!("source={diagram}"),
+        format!("source={diagram} error={diagram_error}"),
     );
 
     // ---- a fence that does not parse -------------------------------------------------------
