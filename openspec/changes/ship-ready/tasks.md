@@ -17,13 +17,13 @@
 
 ## 3. Windows tests
 
-- [ ] 3.1 Add `cargo test --workspace --release --jobs 2` to the Windows job after Qt is installed and before packaging; verify the Windows CI job runs and reports the workspace tests.
+- [x] 3.1 Add `cargo test --workspace --release --jobs 2` to the Windows job after Qt is installed and before packaging; verify the Windows CI job runs and reports the workspace tests.
 - [x] 3.2 If a bridge test needs a display on Windows, move only that test to the Linux job and leave the core and model tests on Windows; verify the Windows job still runs the remaining tests rather than being skipped.
 
 ## 4. GUI scenario in CI
 
-- [ ] 4.1 Add `.github/workflows/livetest.yml` on a schedule and `workflow_dispatch`, with Xvfb, `QT_QUICK_BACKEND=software`, `QSG_RENDER_LOOP=basic`, `TMPDIR=${{ runner.temp }}`, the direct `cargo run -p lognotes-qt --features driver -- --livetest` command, screenshot upload on every run, and `continue-on-error: true`; verify a dispatched run starts and the screenshots upload.
-- [ ] 4.2 Run the workflow once to completion and inspect the screenshot artifact and log; record the promotion criterion (a stable streak, then remove `continue-on-error`) in the workflow comment.
+- [x] 4.1 Add `.github/workflows/livetest.yml` on a schedule and `workflow_dispatch`, with Xvfb, `QT_QUICK_BACKEND=software`, `QSG_RENDER_LOOP=basic`, `TMPDIR=${{ runner.temp }}`, the direct `cargo run -p lognotes-qt --features driver -- --livetest` command, screenshot upload on every run, and `continue-on-error: true`; verify a dispatched run starts and the screenshots upload.
+- [x] 4.2 Run the workflow once to completion and inspect the screenshot artifact and log; record the promotion criterion (a stable streak, then remove `continue-on-error`) in the workflow comment.
 
 ## 5. Distribution decision
 
@@ -43,7 +43,7 @@
 
 - [x] 7.1 Run `make test` and fix every failure; verify the whole workspace passes.
 - [x] 7.2 Run `make livetest` and verify the existing scenario plus the About/version steps pass with screenshots.
-- [ ] 7.3 Let Linux and Windows CI run on a push and verify both are green; dispatch the livetest workflow and verify it completes or reports a documented flake with screenshots.
+- [x] 7.3 Let Linux and Windows CI run on a push and verify both are green; dispatch the livetest workflow and verify it completes or reports a documented flake with screenshots.
 - [x] 7.4 Run the release version check against the current version and a deliberately wrong tag; verify the wrong tag fails before the build and the right one passes.
 - [x] 7.5 Re-read README, `architecture.md`, both `SPEC.md` files, and the archived specs for contradictions; verify the only remaining historical statements are explicitly marked as such.
 
