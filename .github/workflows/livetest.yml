@@ -51,7 +51,6 @@ jobs:
         env:
           QT_QUICK_BACKEND: software
           QSG_RENDER_LOOP: basic
-          QT_DEBUG_PLUGINS: '1'
           TMPDIR: ${{ runner.temp }}
         run: |
           xvfb-run -a --server-args="-screen 0 1600x1200x24" \

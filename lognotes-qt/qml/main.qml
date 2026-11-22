@@ -2070,7 +2070,10 @@ ApplicationWindow {
                         }
                     }
 
-                    onTextEdited: {
+                    onTextChanged: {
+                        if (root.rebuilding || (!activeFocus && editor.text === model.text)) {
+                            return
+                        }
                         root.focusRow = index
                         root.focusCursor = cursorPosition
                         root.wantsFocus = true
