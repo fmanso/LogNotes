@@ -41,10 +41,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Qt plugin dependencies
+        run: |
+          find "$QTDIR/plugins/platforms" -name 'libqxcb.so' -print -exec ldd {} \; \
+            | grep -E 'not found|libxcb|libxkb' || true
+          dpkg -l | grep -E 'libxcb-cursor|libxkbcommon-x11' || true
+
       - name: Drive the window
         env:
           QT_QUICK_BACKEND: software
           QSG_RENDER_LOOP: basic
+          QT_DEBUG_PLUGINS: '1'
           TMPDIR: ${{ runner.temp }}
         run: |
           xvfb-run -a --server-args="-screen 0 1600x1200x24" \
