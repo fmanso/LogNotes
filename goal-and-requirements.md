@@ -98,7 +98,7 @@ Two decisions worth keeping in view:
 
 - **The database is canonical, not Markdown files.** Chosen deliberately after the trade-off was raised:
   it is what the maker asked for, and the consequence accepted is that notes are not readable or
-  portable as plain files without the app. Providing an export path is left open, not required for the
-  first build.
-- **No importer in the first build.** The app starts with an empty graph and Logseq 0.x stays in use in
-  parallel until the clone is trusted.
+  portable as plain files without the app. Export and import now move the graph through a Logseq 0.x
+  folder in both directions; the database stays canonical.
+- **Import covers Logseq 0.x folders, not Logseq 2's database.** The app can start empty or read a
+  `pages/` + `journals/` folder; the 2.x triple store is not an import source.

@@ -65,6 +65,16 @@ ApplicationWindow {
     property bool settingsOpen: false
     // The folder a confirmed export would write into.
     property string pendingExport: ""
+    // The folder an import choice would read, and the backup a confirmed restore would install.
+    property string pendingImport: ""
+    property string pendingRestore: ""
+    property string pendingRestoreName: ""
+    // The page whose header menu is open, for the rename/delete dialogs.
+    property string pageActionName: ""
+    // The block whose "move to page" picker is open.
+    property int moveBlockId: -1
+    // The block being dragged by its handle, -1 when none is.
+    property int dragBlockId: -1
 
     function openSettings() {
         root.settingsOpen = true
@@ -90,12 +100,67 @@ ApplicationWindow {
     }
 
     // `lognotes-2026-11-02.db` reads as a date; a manual copy adds `T202538`, which reads as 20:25.
+    // Safety copies carry their context in the name.
     function backupLabel(name) {
+        if (name.startsWith("pre-migration-")) {
+            return name.replace(/^pre-migration-/, "").replace(/\.db$/, "")
+        }
+        if (name.startsWith("pre-restore-")) {
+            return name.replace(/^pre-restore-/, "").replace(/\.db$/, "")
+        }
         const bare = name.replace(/^lognotes-/, "").replace(/\.db$/, "")
         const parts = bare.split("T")
         if (parts.length !== 2) return bare
         const time = parts[1]
         return parts[0] + " " + time.slice(0, 2) + ":" + time.slice(2, 4)
+    }
+
+    function backupKindLabel(kind) {
+        if (kind === "daily") return qsTr("daily")
+        if (kind === "manual") return qsTr("manual")
+        if (kind === "pre-migration") return qsTr("before upgrade")
+        if (kind === "pre-restore") return qsTr("before restore")
+        return kind
+    }
+
+    function fillMovePages() {
+        movePageModel.clear()
+        const names = JSON.parse(journal.page_names === "" ? "[]" : journal.page_names)
+        const query = movePageFilter.text.toLowerCase()
+        for (let index = 0; index < names.length; index++) {
+            if (query === "" || names[index].toLowerCase().indexOf(query) >= 0) {
+                movePageModel.append({ name: names[index] })
+            }
+        }
+    }
+
+    function toggleFold(row, depth, collapsed) {
+        if (!collapsed) {
+            let cursor = root.focusRow
+            while (cursor > row && cursor < list.count) {
+                const item = list.itemAtIndex(cursor)
+                if (!item || item.rowDepth <= depth) {
+                    break
+                }
+                cursor -= 1
+            }
+            if (cursor === row) {
+                root.focusRow = row
+            }
+        }
+        root.rebuilding = true
+        root.wantsFocus = true
+        journal.set_collapsed(row, !collapsed)
+    }
+
+    function editableRowFrom(row, step) {
+        for (let index = row + step; index >= 0 && index < list.count; index += step) {
+            const item = list.itemAtIndex(index)
+            if (item && item.isBlock) {
+                return index
+            }
+        }
+        return -1
     }
 
     // The quick switcher: one field over the whole graph. `searchHits` is rebuilt from the model's JSON
@@ -133,6 +198,7 @@ ApplicationWindow {
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
     function openPage(name) {
         root.closeSlash()
+        root.closeLinkMenu()
         root.pendingTerm = ""
         searchField.focus = false
         root.emptyPulls = 0
@@ -147,6 +213,7 @@ ApplicationWindow {
     function goJournal() {
         root.settingsOpen = false
         root.closeSlash()
+        root.closeLinkMenu()
         root.pendingTerm = ""
         searchField.focus = false
         root.emptyPulls = 0
@@ -349,6 +416,7 @@ ApplicationWindow {
     // delegate for that row is not instantiated yet.
     function beginEdit(row, caret) {
         root.closeSlash()
+        root.closeLinkMenu()
         root.editingRow = row
         root.focusRow = row
         root.focusCursor = Math.max(0, caret)
@@ -429,6 +497,18 @@ ApplicationWindow {
     // A command whose dialog is open — what the token was, so accepting rewrites the block in the same
     // step the date lands in, and cancelling leaves the token as typed.
     property var slashPending: null
+
+    // Typing `[[` opens completion over the page names in the snapshot. The state lives here for the
+    // same reason the slash menu does: a save rebuilds the delegates, and the menu must outlive them.
+    property int linkRow: -1
+    property var linkEditor: null
+    property var linkSave: null
+    property int linkStart: -1
+    property int linkEnd: -1
+    property string linkQuery: ""
+    property var linkItems: []
+    property int linkSelected: -1
+    property point linkAnchor: Qt.point(0, 0)
 
     // Every block command. `match` is what typing after the "/" filters on, so "/sch" and "/due" both
     // find Scheduled while the name stays short. Every one acts on the block's real state: none of them
@@ -518,6 +598,110 @@ ApplicationWindow {
     function caretAnchor(editor) {
         const rect = editor.positionToRectangle(editor.cursorPosition)
         return editor.mapToItem(Overlay.overlay, rect.x, rect.y + rect.height + 4)
+    }
+
+    function linkRank(name, query) {
+        const lower = name.toLowerCase()
+        if (lower === query) return 0
+        if (lower.startsWith(query)) return 1
+        return 2
+    }
+
+    function closeLinkMenu() {
+        if (root.linkRow < 0) {
+            return
+        }
+        if (root.linkSave !== null) {
+            root.linkSave.restart()
+            root.linkSave = null
+        }
+        root.linkRow = -1
+        root.linkEditor = null
+        root.linkItems = []
+        root.linkSelected = -1
+        if (linkMenu.opened) {
+            linkMenu.close()
+        }
+    }
+
+    function syncLink(row, editor, timer) {
+        if (root.slashRow >= 0) {
+            root.closeLinkMenu()
+            return
+        }
+        const info = journal.link_query(editor.text, editor.cursorPosition)
+        if (info === "") {
+            root.closeLinkMenu()
+            return
+        }
+
+        let parsed
+        try {
+            parsed = JSON.parse(info)
+        } catch (error) {
+            root.closeLinkMenu()
+            return
+        }
+
+        let names = []
+        try {
+            names = JSON.parse(journal.page_names === "" ? "[]" : journal.page_names)
+        } catch (error) {
+            names = []
+        }
+        const query = parsed.query.toLowerCase()
+        let matches = []
+        for (let index = 0; index < names.length; index++) {
+            if (query === "" || names[index].toLowerCase().indexOf(query) >= 0) {
+                matches.push(names[index])
+            }
+        }
+        matches.sort((left, right) => linkRank(left, query) - linkRank(right, query))
+        if (matches.length === 0 && parsed.query !== "") {
+            matches = [parsed.query]
+        }
+
+        root.linkRow = row
+        root.linkEditor = editor
+        root.linkSave = timer
+        root.linkStart = parsed.start
+        root.linkEnd = parsed.end
+        root.linkQuery = parsed.query
+        root.linkItems = matches.slice(0, 8)
+        root.linkSelected = parsed.query === "" ? -1 : 0
+        root.linkAnchor = root.caretAnchor(editor)
+        timer.stop()
+        if (!linkMenu.opened) {
+            linkMenu.open()
+        }
+    }
+
+    function commitLink(name) {
+        if (root.linkRow < 0 || root.linkEditor === null) {
+            return
+        }
+        let picked = name
+        if (picked === undefined || picked === null || picked === "") {
+            if (root.linkQuery === "") {
+                root.closeLinkMenu()
+                return
+            }
+            picked = root.linkQuery
+        }
+
+        const editor = root.linkEditor
+        const text = editor.text
+        let suffix = text.substring(root.linkEnd)
+        if (suffix.startsWith("]]")) {
+            suffix = suffix.substring(2)
+        }
+        const insertion = "[[" + picked + "]]"
+        editor.text = text.substring(0, root.linkStart) + insertion + suffix
+        editor.cursorPosition = root.linkStart + insertion.length
+        root.focusRow = root.linkRow
+        root.focusCursor = editor.cursorPosition
+        root.unsaved = Object.assign({}, root.unsaved, { [root.linkRow]: editor.text })
+        root.closeLinkMenu()
     }
 
     // The block's text with the token swapped for `replacement`; the whole point of the menu is that the
@@ -810,6 +994,76 @@ ApplicationWindow {
         }
     }
 
+    // The `[[` completion list. Like the slash menu it takes no focus, so typing continues in the
+    // editor whose key handler owns Up/Down/Enter/Esc while it is up.
+    Popup {
+        id: linkMenu
+        objectName: "linkPopup"
+        parent: Overlay.overlay
+        visible: root.linkRow >= 0 && root.linkItems.length > 0
+        focus: false
+        modal: false
+        closePolicy: Popup.CloseOnPressOutside
+        width: 240
+        padding: 5
+
+        x: Math.max(12, Math.min(root.linkAnchor.x, root.width - width - 12))
+        y: {
+            const below = root.linkAnchor.y
+            return below + implicitHeight > root.height - 12
+                    ? Math.max(12, below - implicitHeight - 28) : below
+        }
+
+        background: Rectangle {
+            color: theme.page
+            border.color: theme.border
+            radius: 8
+        }
+
+        onClosed: root.closeLinkMenu()
+
+        Column {
+            width: parent.width
+            spacing: 1
+
+            Repeater {
+                model: root.linkItems
+
+                delegate: Rectangle {
+                    objectName: "linkRow"
+                    width: linkMenu.width - 10
+                    height: 27
+                    radius: 6
+                    color: index === root.linkSelected ? theme.hover : "transparent"
+
+                    Label {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData
+                        color: theme.text
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
+                    }
+
+                    TapHandler {
+                        onSingleTapped: root.commitLink(modelData)
+                    }
+
+                    HoverHandler {
+                        onHoveredChanged: {
+                            if (hovered) {
+                                root.linkSelected = index
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Picking a date is one popup, one decision, Esc always backs out. Qt 6.12 ships Controls'
     // `Calendar` as a singleton that cannot be instantiated, so this is built from MonthGrid.
     Popup {
@@ -857,6 +1111,11 @@ ApplicationWindow {
         // One write, so one Ctrl+Z: the token's removal and the date land together.
         function accept() {
             const iso = Qt.formatDate(picked, "yyyy-MM-dd")
+            if (purpose === "open") {
+                close()
+                journal.open_page(iso)
+                return
+            }
             const pending = root.slashPending
             const text = pending !== null ? rewrite(pending, purpose === "insert" ? "[[" + iso + "]]" : "") : ""
             root.slashPending = null
@@ -982,6 +1241,7 @@ ApplicationWindow {
                 }
 
                 QuietButton {
+                    objectName: "dateCancel"
                     text: qsTr("Cancel")
                     onClicked: datePopup.cancel()
                 }
@@ -1042,6 +1302,12 @@ ApplicationWindow {
                 objectName: "journalButton"
                 text: qsTr("Journal")
                 onClicked: root.goJournal()
+            }
+
+            QuietButton {
+                objectName: "dateButton"
+                text: qsTr("Date")
+                onClicked: datePopup.openFor(-1, "open")
             }
 
             QuietButton {
@@ -1444,6 +1710,9 @@ ApplicationWindow {
 
             property alias blockEditor: editor
             property bool isBlock: kind === "block" || kind === "placeholder"
+            property int rowBlockId: model.blockId
+            property int rowDepth: model.depth
+            property bool rowIsBlock: kind === "block"
             property bool isHeading: kind === "heading" || kind === "agenda-header"
                     || kind === "page-header" || kind === "reference-header"
                     || kind === "unlinked-header"
@@ -1470,6 +1739,8 @@ ApplicationWindow {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 4
+                anchors.right: kind === "page-header" ? pageMenuButton.left : parent.right
+                anchors.rightMargin: kind === "page-header" ? 8 : 0
                 text: (kind === "heading" || (kind === "page-header" && model.date !== ""))
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
                       : model.text
@@ -1514,6 +1785,63 @@ ApplicationWindow {
                 }
             }
 
+            QuietButton {
+                id: pageMenuButton
+                objectName: "pageMenuButton"
+                visible: kind === "page-header" && model.date === ""
+                text: qsTr("…")
+                anchors.right: favouriteStar.left
+                anchors.bottom: sectionHeading.bottom
+                anchors.bottomMargin: -6
+                onClicked: {
+                    root.pageActionName = model.text
+                    pageMenu.open()
+                }
+            }
+
+            Popup {
+                id: pageMenu
+                parent: pageMenuButton
+                x: -width + pageMenuButton.width
+                y: pageMenuButton.height + 4
+                width: 160
+                modal: true
+                focus: true
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                padding: 6
+
+                background: Rectangle {
+                    color: theme.page
+                    border.color: theme.border
+                    radius: 6
+                }
+
+                contentItem: Column {
+                    width: 148
+                    spacing: 2
+
+                    QuietButton {
+                        objectName: "renamePageMenuItem"
+                        width: parent.width
+                        text: qsTr("Rename")
+                        onClicked: {
+                            pageMenu.close()
+                            renamePageDialog.open()
+                        }
+                    }
+
+                    QuietButton {
+                        objectName: "deletePageMenuItem"
+                        width: parent.width
+                        text: qsTr("Delete")
+                        onClicked: {
+                            pageMenu.close()
+                            deletePageDialog.open()
+                        }
+                    }
+                }
+            }
+
             // Anchored layout rather than a Row: an editor whose width is computed from its own
             // x inside a Row is a binding loop, and Qt resolves it by collapsing the width to 0.
             Item {
@@ -1525,8 +1853,82 @@ ApplicationWindow {
 
                 Item {
                     id: indentSpacer
-                    width: model.depth * 24
+                    width: 24 + model.depth * 24
                     height: 1
+                }
+
+                Item {
+                    id: foldButton
+                    objectName: "foldButton"
+                    visible: rowItem.isBlock && model.foldable
+                    x: model.depth * 24
+                    width: 14
+                    height: 20
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Label {
+                        anchors.centerIn: parent
+                        text: model.collapsed ? "▸" : "▾"
+                        color: theme.textGhost
+                        font.pixelSize: 12
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleFold(index, model.depth, model.collapsed)
+                    }
+                }
+
+                // A handle for reordering the block. It also gives the mouse somewhere to start a
+                // drag that is not the text itself.
+                Item {
+                    id: dragHandle
+                    objectName: "dragHandle"
+                    visible: rowItem.rowIsBlock
+                             && (rowItem.hovered || root.dragBlockId === model.blockId)
+                    x: model.depth * 24 + 14
+                    width: 12
+                    height: 20
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Label {
+                        anchors.centerIn: parent
+                        text: "⋮"
+                        color: theme.textGhost
+                        font.pixelSize: 14
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        preventStealing: true
+                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                        onPressed: root.dragBlockId = model.blockId
+                        onReleased: {
+                            if (root.dragBlockId < 0) {
+                                return
+                            }
+                            const dragged = root.dragBlockId
+                            root.dragBlockId = -1
+                            const point = dragHandle.mapToItem(list, mouse.x, mouse.y)
+                            const row = list.indexAt(point.x, point.y + list.contentY)
+                            if (row < 0) {
+                                return
+                            }
+                            const target = list.itemAtIndex(row)
+                            if (!target || !target.rowIsBlock || target.rowBlockId === dragged
+                                    || target.rowBlockId < 0) {
+                                return
+                            }
+                            const contentY = point.y + list.contentY
+                            if (contentY < target.y + target.height / 2) {
+                                journal.move_block_before(dragged, target.rowBlockId)
+                            } else {
+                                journal.move_block_after(dragged, target.rowBlockId)
+                            }
+                        }
+                        onCanceled: root.dragBlockId = -1
+                    }
                 }
 
                 // The marker box is both the affordance and the state.
@@ -1674,6 +2076,7 @@ ApplicationWindow {
                         root.wantsFocus = true
                         root.unsaved = Object.assign({}, root.unsaved, { [index]: editor.text })
                         syncSlash()
+                        root.syncLink(index, editor, debounce)
                     }
 
                     // Moving the caret off the token — or back over it with Backspace — is the menu
@@ -1683,6 +2086,7 @@ ApplicationWindow {
                             return
                         }
                         syncSlash()
+                        root.syncLink(index, editor, debounce)
                     }
 
                     onInputMethodComposingChanged: {
@@ -1692,6 +2096,37 @@ ApplicationWindow {
                     }
 
                     Keys.onPressed: (event) => {
+                        // The completion list owns the navigation keys while it is up, just like the
+                        // slash menu below it.
+                        if (root.linkRow === index) {
+                            const count = root.linkItems.length
+                            if (event.key === Qt.Key_Down) {
+                                if (count > 0) {
+                                    root.linkSelected = root.linkSelected < 0
+                                        ? 0 : (root.linkSelected + 1) % count
+                                }
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Up) {
+                                if (count > 0) {
+                                    root.linkSelected = root.linkSelected < 0
+                                        ? count - 1
+                                        : (root.linkSelected + count - 1) % count
+                                }
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                const picked = count > 0 && root.linkSelected >= 0
+                                    ? root.linkItems[root.linkSelected] : undefined
+                                root.commitLink(picked)
+                                event.accepted = true
+                                return
+                            } else if (event.key === Qt.Key_Escape) {
+                                root.closeLinkMenu()
+                                event.accepted = true
+                                return
+                            }
+                        }
                         // The menu is open under this block, so it owns the navigation keys before the
                         // block does: Enter picks a command instead of splitting, Up/Down move the
                         // highlight instead of the caret, Esc leaves the token as ordinary text.
@@ -1718,8 +2153,52 @@ ApplicationWindow {
                                 event.accepted = true
                                 return
                             }
-                        }
-                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        } else if (event.key === Qt.Key_Up
+                                   && ((event.modifiers & Qt.AltModifier)
+                                       || ((event.modifiers & Qt.ControlModifier)
+                                           && (event.modifiers & Qt.ShiftModifier)))) {
+                            // Alt+Up reorders among siblings; Ctrl+Shift+Up is the fallback where the
+                            // desktop owns Alt. The caret follows the block by id.
+                            debounce.stop()
+                            root.rebuilding = true
+                            root.wantsFocus = true
+                            journal.move_up(index, text)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Down
+                                   && ((event.modifiers & Qt.AltModifier)
+                                       || ((event.modifiers & Qt.ControlModifier)
+                                           && (event.modifiers & Qt.ShiftModifier)))) {
+                            debounce.stop()
+                            root.rebuilding = true
+                            root.wantsFocus = true
+                            journal.move_down(index, text)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_M
+                                   && (event.modifiers & Qt.ControlModifier)
+                                   && (event.modifiers & Qt.ShiftModifier)) {
+                            root.moveBlockId = model.blockId
+                            movePageDialog.open()
+                            event.accepted = true
+                        } else if ((event.key === Qt.Key_Up || event.key === Qt.Key_Down)
+                                   && (event.modifiers
+                                       & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) === 0
+                                   && editor.selectedText.length === 0) {
+                            const up = event.key === Qt.Key_Up
+                            const onEdge = up
+                                ? editor.text.lastIndexOf("\n", editor.cursorPosition - 1) < 0
+                                : editor.text.indexOf("\n", editor.cursorPosition) < 0
+                            if (onEdge) {
+                                const target = root.editableRowFrom(index, up ? -1 : 1)
+                                if (target >= 0) {
+                                    root.focusCursor = up ? 1000000 : 0
+                                    root.wantsFocus = true
+                                    if (!root.focusBlock(target)) {
+                                        Qt.callLater(root.focusBlock, target)
+                                    }
+                                    event.accepted = true
+                                }
+                            }
+                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                             debounce.stop()
                             if ((event.modifiers & Qt.ShiftModifier)
                                     || journal.in_fence(editor.text, cursorPosition)) {
@@ -1991,6 +2470,13 @@ ApplicationWindow {
                 spacing: 10
 
                 QuietButton {
+                    objectName: "restoreBackupFromError"
+                    visible: journal.can_restore
+                    text: qsTr("Restore a backup…")
+                    onClicked: root.restoreBackupFile.open()
+                }
+
+                QuietButton {
                     text: qsTr("Retry")
                     onClicked: journal.start()
                 }
@@ -2010,6 +2496,18 @@ ApplicationWindow {
         anchors.margins: 12
         text: journal.error
         color: theme.dangerText
+    }
+
+    Label {
+        objectName: "journalNote"
+        visible: journal.ready && journal.error === "" && journal.note !== "" && !root.settingsOpen
+        anchors.bottom: parent.bottom
+        anchors.right: parent.right
+        anchors.margins: 12
+        text: journal.note
+        color: theme.textFaint
+        font.pixelSize: 12
+        wrapMode: Text.WordWrap
     }
 
     // ---- the settings page ----------------------------------------------------------------
@@ -2145,9 +2643,25 @@ ApplicationWindow {
                             }
 
                             Label {
+                                text: root.backupKindLabel(modelData.kind)
+                                color: theme.textGhost
+                                font.pixelSize: 11
+                            }
+
+                            Label {
                                 text: root.sizeText(modelData.bytes)
                                 color: theme.textGhost
                                 font.pixelSize: 12
+                            }
+
+                            QuietButton {
+                                objectName: "restoreBackup"
+                                text: qsTr("Restore")
+                                onClicked: {
+                                    root.pendingRestore = modelData.path
+                                    root.pendingRestoreName = modelData.name
+                                    confirmRestore.open()
+                                }
                             }
                         }
                     }
@@ -2202,6 +2716,44 @@ ApplicationWindow {
                         wrapMode: Text.WordWrap
                     }
                 }
+
+                Rectangle { width: parent.width; height: 1; color: theme.rule }
+
+                // ---- about
+                Column {
+                    width: parent.width
+                    spacing: 6
+
+                    Label {
+                        text: qsTr("ABOUT")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+
+                    Label {
+                        objectName: "aboutVersion"
+                        text: qsTr("LogNotes %1").arg(journal.version)
+                        color: theme.text
+                        font.pixelSize: 15
+                        font.bold: true
+                    }
+
+                    Label {
+                        width: parent.width
+                        text: qsTr("A journal-first outliner on a local database. MIT licensed.")
+                        color: theme.textMuted
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Label {
+                        text: qsTr("Platform: %1").arg(Qt.platform.os)
+                        color: theme.textFaint
+                        font.pixelSize: 12
+                    }
+                }
             }
         }
     }
@@ -2224,7 +2776,275 @@ ApplicationWindow {
     FolderDialog {
         id: importFolder
         title: qsTr("Import a Logseq folder…")
-        onAccepted: journal.import_from(root.localPath(selectedFolder))
+        onAccepted: {
+            root.pendingImport = root.localPath(selectedFolder)
+            importModeChooser.open()
+        }
+    }
+
+    Dialog {
+        id: importModeChooser
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("How should this folder be imported?")
+
+        contentItem: Label {
+            width: 400
+            text: qsTr("Merge replaces the pages and days this folder names and leaves the rest alone. Replace all clears every block first, so pages the folder does not name become empty.")
+            color: theme.text
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "importCancel"
+                text: qsTr("Cancel")
+                onClicked: importModeChooser.close()
+            }
+
+            QuietButton {
+                objectName: "importMerge"
+                text: qsTr("Merge")
+                onClicked: {
+                    importModeChooser.close()
+                    journal.import_from(root.pendingImport)
+                }
+            }
+
+            QuietButton {
+                objectName: "importReplaceAll"
+                text: qsTr("Replace all")
+                onClicked: {
+                    importModeChooser.close()
+                    journal.import_replace_all(root.pendingImport)
+                }
+            }
+        }
+    }
+
+    FileDialog {
+        id: restoreBackupFile
+        title: qsTr("Restore a backup…")
+        currentFolder: journal.backup_folder
+        nameFilters: [qsTr("LogNotes backups (*.db)"), qsTr("All files (*)")]
+        onAccepted: {
+            root.pendingRestore = root.localPath(selectedFile)
+            const parts = selectedFile.toString().split("/")
+            root.pendingRestoreName = parts[parts.length - 1]
+            confirmRestore.open()
+        }
+    }
+
+    ListModel {
+        id: movePageModel
+    }
+
+    Dialog {
+        id: movePageDialog
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("Move block to page")
+
+        onOpened: {
+            movePageFilter.text = ""
+            root.fillMovePages()
+            movePageFilter.forceActiveFocus()
+            movePageList.currentIndex = movePageModel.count > 0 ? 0 : -1
+        }
+
+        contentItem: Column {
+            width: 420
+            spacing: 8
+
+            TextField {
+                id: movePageFilter
+                width: parent.width
+                placeholderText: qsTr("Filter pages…")
+                onTextChanged: {
+                    root.fillMovePages()
+                    movePageList.currentIndex = movePageModel.count > 0 ? 0 : -1
+                }
+                onAccepted: {
+                    if (movePageModel.count > 0) {
+                        const name = movePageModel.get(movePageList.currentIndex < 0
+                                                        ? 0 : movePageList.currentIndex).name
+                        journal.move_block_to_page(root.moveBlockId, name)
+                        movePageDialog.close()
+                    }
+                }
+                Keys.onDownPressed: {
+                    if (movePageList.count > 0) {
+                        movePageList.currentIndex = Math.min(movePageList.currentIndex + 1,
+                                                             movePageList.count - 1)
+                    }
+                }
+                Keys.onUpPressed: {
+                    if (movePageList.count > 0) {
+                        movePageList.currentIndex = Math.max(movePageList.currentIndex - 1, 0)
+                    }
+                }
+            }
+
+            ListView {
+                id: movePageList
+                width: parent.width
+                height: 240
+                clip: true
+                model: movePageModel
+
+                delegate: Item {
+                    width: movePageList.width
+                    height: 30
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: ListView.isCurrentItem ? theme.hover : "transparent"
+                    }
+
+                    Label {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: model.name
+                        color: theme.text
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            journal.move_block_to_page(root.moveBlockId, model.name)
+                            movePageDialog.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: renamePageDialog
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("Rename page")
+
+        function submit() {
+            close()
+            journal.rename_page(renamePageField.text)
+        }
+
+        onOpened: {
+            renamePageField.text = root.pageActionName
+            renamePageField.forceActiveFocus()
+            renamePageField.selectAll()
+        }
+
+        contentItem: TextField {
+            id: renamePageField
+            objectName: "renamePageField"
+            width: 380
+            selectByMouse: true
+            onAccepted: renamePageDialog.submit()
+            Keys.onEscapePressed: renamePageDialog.close()
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "cancelRenamePage"
+                text: qsTr("Cancel")
+                onClicked: renamePageDialog.close()
+            }
+
+            QuietButton {
+                objectName: "confirmRenamePage"
+                text: qsTr("Rename")
+                onClicked: renamePageDialog.submit()
+            }
+        }
+    }
+
+    Dialog {
+        id: deletePageDialog
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("Delete page?")
+
+        contentItem: Label {
+            width: 400
+            text: journal.page_linked > 0
+                  ? qsTr("This page still has %1 linked references. Remove them before deleting it.")
+                    .arg(journal.page_linked)
+                  : qsTr("Delete %1 and its blocks? This can be undone.")
+                    .arg(root.pageActionName)
+            color: theme.text
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "cancelDeletePage"
+                text: qsTr("Cancel")
+                onClicked: deletePageDialog.close()
+            }
+
+            QuietButton {
+                objectName: "confirmDeletePage"
+                text: qsTr("Delete")
+                enabled: journal.page_linked === 0
+                onClicked: {
+                    deletePageDialog.close()
+                    journal.delete_page()
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: confirmRestore
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        title: qsTr("Restore this backup?")
+
+        contentItem: Label {
+            width: 380
+            text: qsTr("The notes now open will be replaced by %1. The current database is kept in the backups folder first.")
+                  .arg(root.pendingRestoreName)
+            color: theme.text
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "cancelRestore"
+                text: qsTr("Cancel")
+                onClicked: confirmRestore.close()
+            }
+
+            QuietButton {
+                objectName: "confirmRestore"
+                text: qsTr("Restore")
+                onClicked: {
+                    confirmRestore.close()
+                    journal.restore_backup(root.pendingRestore)
+                }
+            }
+        }
     }
 
     Dialog {

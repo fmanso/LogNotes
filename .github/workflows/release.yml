@@ -15,7 +15,31 @@ permissions:
   contents: write
 
 jobs:
+  # Fail before either platform is built when the tag and the package disagree. The tag push is the
+  # normal path; a workflow_dispatch checks out the tag it names, while the reusable build below still
+  # uses the default branch (so the tag and that branch must hold the same version).
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Tag matches Cargo.toml
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="$TAG"
+          test "$tag" = "v$version" || {
+            echo "Tag $tag does not match package version $version (expected v$version)"
+            exit 1
+          }
+          echo "$tag matches package version $version"
+
   build:
+    needs: version
     uses: ./.github/workflows/ci.yml
 
   publish:

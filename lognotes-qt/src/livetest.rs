@@ -103,6 +103,57 @@ pub fn run() -> ! {
         format!("blocks={:?}", blocks(&root)),
     );
 
+    // Alt+Up/Down reorder the block without moving the caret out of it.
+    driver::press_key(key::UP, modifier::ALT);
+    driver::settle();
+    check(
+        "alt+up swaps the block with its previous sibling",
+        blocks(&root) == ["second", "hello world"],
+        format!("blocks={:?}", blocks(&root)),
+    );
+    // Alt+Down is sometimes owned by the desktop; Ctrl+Shift+Down is the same action.
+    driver::press_key(key::DOWN, modifier::CTRL | modifier::SHIFT);
+    driver::settle();
+    check(
+        "ctrl+shift+down swaps it back",
+        blocks(&root) == ["hello world", "second"],
+        format!("blocks={:?}", blocks(&root)),
+    );
+
+    // Up/Down at the text edge move the caret into the neighbouring block, and a keystroke lands
+    // there immediately afterwards.
+    driver::press_key(key::UP, modifier::NONE);
+    driver::settle();
+    driver::type_text(&QString::from("!"));
+    driver::settle();
+    check(
+        "up from the first line moves to the previous block and takes a keystroke",
+        blocks(&root) == ["hello world!", "second"],
+        format!("blocks={:?}", blocks(&root)),
+    );
+    driver::press_key(key::Z, modifier::CTRL);
+    driver::settle();
+    driver::press_key(key::DOWN, modifier::NONE);
+    driver::settle();
+    driver::type_text(&QString::from("?"));
+    driver::settle();
+    check(
+        "down from the last line moves to the next block and takes a keystroke",
+        blocks(&root) == ["hello world", "?second"],
+        format!("blocks={:?}", blocks(&root)),
+    );
+    driver::press_key(key::Z, modifier::CTRL);
+    driver::settle();
+    check(
+        "the navigation edits undo back to the original text",
+        blocks(&root) == ["hello world", "second"],
+        format!("blocks={:?}", blocks(&root)),
+    );
+
+    // Put the caret back in the second block for the indent step.
+    driver::click_block_at(row_with("second"), 0.25);
+    driver::settle();
+
     driver::press_key(key::TAB, modifier::NONE);
     driver::settle();
     shot("05-indent");
@@ -111,6 +162,27 @@ pub fn run() -> ! {
         depths(&root) == [0, 1],
         format!("depths={:?}", depths(&root)),
     );
+
+    // Folding hides the child, and unfolding restores it; neither enters undo.
+    let rows_before_fold = driver::row_count();
+    driver::click_named(&QString::from("foldButton"), 0);
+    driver::settle();
+    check(
+        "folding hides a block's children",
+        driver::row_count() < rows_before_fold,
+        format!("{} -> {}", rows_before_fold, driver::row_count()),
+    );
+    driver::click_named(&QString::from("foldButton"), 0);
+    driver::settle();
+    check(
+        "unfolding brings them back",
+        driver::row_count() == rows_before_fold,
+        format!("{} -> {}", rows_before_fold, driver::row_count()),
+    );
+    // The fold moved the caret to the parent; put it back in the child before outdenting.
+    let child_row = row_with("second");
+    driver::click_block_at(child_row, 0.25);
+    driver::settle();
 
     driver::press_key(key::BACKTAB, modifier::SHIFT);
     driver::settle();
@@ -689,6 +761,211 @@ pub fn run() -> ! {
         ),
     );
 
+    // ---- page actions ---------------------------------------------------------------------
+    // The link that led here names My Project, so a rename must follow it in the journal too.
+    let action_note = || driver::journal_property(&QString::from("note")).to_string();
+    driver::click_named(&QString::from("pageMenuButton"), 0);
+    driver::settle();
+    check(
+        "a named page opens its own header menu",
+        driver::visible(&QString::from("renamePageMenuItem")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+    driver::click_named(&QString::from("renamePageMenuItem"), 0);
+    driver::settle();
+    driver::press_key(key::A, modifier::CTRL);
+    driver::type_text(&QString::from("Renamed Project"));
+    driver::press_key(key::RETURN, modifier::NONE);
+    wait_until(|| action_note().starts_with("Renamed") || action_note().starts_with("could not"));
+    check(
+        "a page rename keeps the page and its block",
+        page_blocks(&root, "Renamed Project")
+            .iter()
+            .any(|block| block.contains('R')),
+        format!("note={:?}", action_note()),
+    );
+    shot("29a-page-renamed");
+
+    driver::click_named(&QString::from("journalButton"), 0);
+    driver::settle();
+    check(
+        "the journal link follows the rename",
+        blocks(&root)
+            .iter()
+            .any(|block| block.contains("Renamed Project")),
+        format!("blocks={:?}", blocks(&root)),
+    );
+
+    driver::click_block_at(0, 0.05);
+    driver::settle();
+    driver::press_key(key::Z, modifier::CTRL);
+    driver::settle();
+    wait_until(|| blocks(&root).iter().any(|block| block.contains("[[My Project]]")));
+    let after_undo = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    check(
+        "one undo restores the old page and the link text",
+        blocks(&root).iter().any(|block| block.contains("[[My Project]]"))
+            && after_undo
+                .page_by_name("renamed project")
+                .expect("a lookup")
+                .is_none()
+            && after_undo
+                .page_by_name("my project")
+                .expect("a lookup")
+                .is_some(),
+        format!("blocks={:?}", blocks(&root)),
+    );
+
+    // A page that is still linked refuses deletion; the dialog disables the button and the page stays.
+    driver::call_journal(
+        &QString::from("open_page"),
+        &QString::from("My Project"),
+    );
+    wait_until(|| {
+        driver::named_text(&QString::from("pageHeading"), 0).to_string() == "My Project"
+    });
+    let linked = driver::journal_property(&QString::from("page_linked"))
+        .to_string()
+        .parse::<i32>()
+        .unwrap_or(0);
+    check(
+        "a linked page reports how many links it has",
+        linked > 0,
+        format!("page_linked={linked}"),
+    );
+    driver::click_named(&QString::from("pageMenuButton"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("deletePageMenuItem"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("confirmDeletePage"), 0);
+    driver::settle();
+    let still_there = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    check(
+        "a linked page is not deleted",
+        still_there
+            .page_by_name("my project")
+            .expect("a lookup")
+            .is_some(),
+        format!("page_linked={linked}"),
+    );
+    driver::click_named(&QString::from("cancelDeletePage"), 0);
+    driver::settle();
+
+    // An unlinked page goes through the same menu and returns to the journal.
+    driver::call_journal(&QString::from("open_page"), &QString::from("Solo"));
+    wait_until(|| driver::named_text(&QString::from("pageHeading"), 0).to_string() == "Solo");
+    driver::click_named(&QString::from("pageMenuButton"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("deletePageMenuItem"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("confirmDeletePage"), 0);
+    wait_until(|| action_note().starts_with("Deleted"));
+    let after_delete = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    check(
+        "an unlinked page is deleted and the journal returns",
+        after_delete
+            .page_by_name("solo")
+            .expect("a lookup")
+            .is_none()
+            && !driver::visible(&QString::from("pageMenuButton")),
+        format!("note={:?}", action_note()),
+    );
+    shot("29b-page-deleted");
+
+    // Move to page: create a target, open the linked page, and send its block there.
+    driver::call_journal(
+        &QString::from("open_page"),
+        &QString::from("Target Page"),
+    );
+    wait_until(|| {
+        driver::named_text(&QString::from("pageHeading"), 0).to_string() == "Target Page"
+    });
+    driver::call_journal(
+        &QString::from("open_page"),
+        &QString::from("My Project"),
+    );
+    wait_until(|| {
+        driver::named_text(&QString::from("pageHeading"), 0).to_string() == "My Project"
+    });
+    let move_row = row_with("R");
+    driver::click_block_at(move_row, 0.05);
+    driver::settle();
+    driver::press_key(key::M, modifier::CTRL | modifier::SHIFT);
+    driver::settle();
+    driver::type_text(&QString::from("Target Page"));
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::settle();
+    check(
+        "move to page sends the block to the chosen page",
+        page_blocks(&root, "Target Page")
+            .iter()
+            .any(|block| block.contains('R'))
+            && page_blocks(&root, "My Project").is_empty(),
+        format!(
+            "target={:?} source={:?}",
+            page_blocks(&root, "Target Page"),
+            page_blocks(&root, "My Project")
+        ),
+    );
+    shot("29c-moved-to-page");
+
+    // Date navigation: the control opens, and an unwritten day is a page without a database row
+    // until the first keystroke.
+    driver::click_named(&QString::from("dateButton"), 0);
+    driver::settle();
+    check(
+        "the journal has a date control",
+        driver::visible(&QString::from("datePopupContent")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+    driver::click_named(&QString::from("dateCancel"), 0);
+    driver::settle();
+    check(
+        "the date control closes without opening a day",
+        !driver::visible(&QString::from("datePopupContent")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+
+    driver::call_journal(
+        &QString::from("open_page"),
+        &QString::from("2027-01-01"),
+    );
+    wait_until(|| {
+        driver::named_text(&QString::from("pageHeading"), 0)
+            .to_string()
+            .contains("2027")
+    });
+    let unwritten = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    check(
+        "an unwritten day opens without a row",
+        unwritten
+            .journal_page("2027-01-01")
+            .expect("a lookup")
+            .is_none(),
+        format!("heading={}", driver::named_text(&QString::from("pageHeading"), 0).to_string()),
+    );
+    driver::click_block_at(0, 0.25);
+    driver::settle();
+    driver::type_text(&QString::from("future day"));
+    driver::settle();
+    let written = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    check(
+        "the first keystroke creates the day and its block",
+        written
+            .journal_page("2027-01-01")
+            .expect("a lookup")
+            .is_some()
+            && written
+                .day("2027-01-01")
+                .expect("the day")
+                .blocks
+                .iter()
+                .any(|block| block.content == "future day"),
+        "2027-01-01".to_string(),
+    );
+    driver::click_named(&QString::from("journalButton"), 0);
+    driver::settle();
+
     // ---- slash commands at block level --------------------------------------------------------
     // Back in the journal column: the search steps above left the window on a page, and a slash command
     // belongs to whatever block the caret is in, so start from the column the rest of the run is about.
@@ -856,6 +1133,19 @@ pub fn run() -> ! {
         backup_path.ends_with("backups"),
         backup_path.clone(),
     );
+    let about = driver::named_text(&QString::from("aboutVersion"), 0).to_string();
+    check(
+        "the About section names the build and the version is the package version",
+        about == format!("LogNotes {}", env!("CARGO_PKG_VERSION"))
+            && driver::journal_property(&QString::from("version")).to_string()
+                == env!("CARGO_PKG_VERSION"),
+        about,
+    );
+    check(
+        "the app can offer a restore",
+        driver::journal_property(&QString::from("can_restore")).to_string() == "true",
+        driver::journal_property(&QString::from("can_restore")).to_string(),
+    );
 
     // The day's copy was written as the store opened; "Back up now" adds one beside it.
     let count_backups = || {
@@ -947,6 +1237,121 @@ pub fn run() -> ! {
         format!("{imported:?}"),
     );
     shot("32-imported");
+
+    // Replace all: a folder with one day clears every other block first.
+    let replace_dir = root.join("logseq-replace");
+    std::fs::create_dir_all(replace_dir.join("journals")).expect("the replace folder");
+    std::fs::write(
+        replace_dir.join("journals").join("2026_11_06.md"),
+        "- replaced graph\n",
+    )
+    .expect("a replacement day");
+    driver::call_journal(
+        &QString::from("import_replace_all"),
+        &QString::from(replace_dir.to_string_lossy().as_ref()),
+    );
+    wait_until(|| note().contains("logseq-replace") || note().starts_with("could not"));
+    let replaced = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the store");
+    let replaced_day = replaced.day("2026-11-06").expect("the replacement day").blocks;
+    let old_day = replaced.day("2026-11-05").expect("the old day").blocks;
+    check(
+        "replace all clears the old blocks and writes the folder's",
+        replaced_day.len() == 1
+            && replaced_day[0].content == "replaced graph"
+            && old_day.is_empty(),
+        format!("new={replaced_day:?} old={old_day:?} note={:?}", note()),
+    );
+    shot("32b-replaced");
+
+    // A restore is driven through the invokable the confirmation dialog calls. The live graph at this
+    // point has the imported day; the chosen file has one named page instead.
+    let restore_source = root.join("restore-source.db");
+    {
+        let mut source = lognotes_core::Store::open(&restore_source).expect("the restore source");
+        let page = source.ensure_page("Restored Page").expect("a page");
+        source
+            .insert_block(page, None, "restored from backup")
+            .expect("a block");
+        // The close test needs a block in today's journal after the swap; give the source one.
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let day = source.ensure_journal_page(&today).expect("a day");
+        source
+            .insert_block(day, None, "restored day")
+            .expect("a day block");
+    }
+    driver::call_journal(
+        &QString::from("restore_backup"),
+        &QString::from(restore_source.to_string_lossy().as_ref()),
+    );
+    wait_until(|| note().starts_with("Restored") || note().starts_with("could not"));
+    let restored = lognotes_core::Store::open(&root.join("lognotes.db")).expect("the restored store");
+    check(
+        "restore swaps in the chosen graph",
+        restored
+            .page_by_name("Restored Page")
+            .expect("a lookup")
+            .is_some(),
+        format!("note={:?}", note()),
+    );
+    check(
+        "the previous database was saved as a pre-restore copy",
+        driver::journal_property(&QString::from("backups"))
+            .to_string()
+            .contains("pre-restore"),
+        driver::journal_property(&QString::from("backups"))
+            .to_string()
+            .chars()
+            .take(180)
+            .collect(),
+    );
+    shot("33-restored");
+
+    // `[[` completion over the pages in the restored graph, in a fresh block so the close test's
+    // first block keeps its plain text.
+    driver::click_block_at(0, 0.25);
+    driver::settle();
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::settle();
+    driver::type_text(&QString::from("[[Rest"));
+    driver::settle();
+    check(
+        "typing [[ offers the pages in the graph",
+        driver::visible(&QString::from("linkRow")),
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::settle();
+    check(
+        "completion inserts a complete link",
+        blocks(&root)
+            .iter()
+            .any(|block| block.contains("[[Restored Page]]")),
+        format!("blocks={:?}", blocks(&root)),
+    );
+    shot("33b-link-complete");
+
+    // With no matching page, Enter still closes the token and saving creates the page.
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::settle();
+    driver::type_text(&QString::from("[[Fresh"));
+    driver::settle();
+    driver::press_key(key::RETURN, modifier::NONE);
+    driver::settle();
+    wait_until(|| {
+        lognotes_core::Store::open(&root.join("lognotes.db"))
+            .ok()
+            .and_then(|store| store.page_by_name("fresh").ok().flatten())
+            .is_some()
+    });
+    check(
+        "a new name commits and creates its page",
+        lognotes_core::Store::open(&root.join("lognotes.db"))
+            .expect("the store")
+            .page_by_name("fresh")
+            .expect("a lookup")
+            .is_some(),
+        format!("blocks={:?}", blocks(&root)),
+    );
 
     // Back to the journal for the close test.
     driver::click_named(&QString::from("journalButton"), 0);

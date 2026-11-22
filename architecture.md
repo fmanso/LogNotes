@@ -121,7 +121,11 @@ not a view concern — so the same list can later appear elsewhere without reimp
 
 ## Invariants
 
-- A block has exactly one owning page; nesting is a tree within that page and never crosses pages.
+- A block has exactly one owning page; nesting is a tree within that page and never crosses pages. A move
+  carries the whole subtree, and every descendant's page ownership follows it.
+- A page rename rewrites the explicit references in block text in the same action; deleting a page is
+  refused while any block still links to it. Plain mentions are prose, not references.
+- A folded block's children are omitted from the snapshot, and folding is view state: it never enters undo.
 - Block text is canonical for links; the link table is derived and rebuildable from it.
 - What a block looks like is derived from its text: styling never changes a character, and a diagram is
   named after the content that produced it, so both can be thrown away and recomputed.
@@ -134,20 +138,26 @@ not a view concern — so the same list can later appear elsewhere without reimp
   dates listed as overdue until they are marked `DONE`. *(The 7-day horizon and the overdue rule are
   unconfirmed inferences from the maker's wording, recorded the same way in `lognotes`.)*
 - Only the worker thread touches the connection; the UI holds snapshots, and never a handle to the data.
+- One process owns a data folder: an exclusive lock is taken before the store opens, and a second launch
+  reports that LogNotes is already running instead of opening a second writer.
 - A view never renders note rows before the store has opened: an unreadable database shows an error, never
   an empty journal.
-- The database file is the only persistent state; deleting it loses nothing that exists elsewhere,
-  because nothing else exists.
+- The database is the only source of note state; the backups and the log are recovery copies and
+  diagnostics, not a second truth. Deleting the database loses the notes; the newest backup is the way back.
 
 ## Storage
 
 SQLite through `rusqlite`, in WAL mode, one connection owned by the worker thread. Schema changes are
 versioned with `PRAGMA user_version` and applied on open, so an older file is migrated upward in place
-rather than rejected. Full-text search (FTS5) backs the plain-mention half of linked references; like the
-link table, it is an index over block text rather than data in its own right.
+rather than rejected. Each version step commits with its `user_version`, and an existing graph is copied
+into `backups/` with `VACUUM INTO` before the first step; if the copy fails, the upgrade does not run.
+Full-text search (FTS5) backs the plain-mention half of linked references; like the link table, it is an
+index over block text rather than data in its own right.
 
 The file lives in the OS application-data directory — `$XDG_DATA_HOME/lognotes` on Linux,
-`%APPDATA%\LogNotes` on Windows — so it survives reinstalls and is easy to back up by copying one file.
+`%LOCALAPPDATA%\LogNotes` on Windows — so it survives reinstalls and is easy to back up by copying one file.
+A v0.1.0 Windows install's `%APPDATA%\LogNotes` graph is moved there once, with its WAL sidecars and
+backups, before the store opens; if that move fails, the app reports it and does not start an empty graph.
 This is the only OS-specific surface in the codebase.
 
 ## Packaging
@@ -159,7 +169,7 @@ requirement: Qt's SVG image plugin, without which a drawn diagram silently rende
 
 ## Out of scope
 
-The following are absent by decision, not yet to be built: importing an existing Logseq 0.x graph,
-exporting the database back to Markdown, sync between devices, plugin hosting, and the 2.x features the
-maker does not use (queries, properties, graph view, whiteboards, flashcards). An export path is recorded
-as open in `lognotes` — it is the one gap the canonical-database choice creates.
+The following are absent by decision, not yet to be built: sync between devices, plugin hosting, and the
+2.x features the maker does not use (queries, properties, graph view, whiteboards, flashcards). The
+Markdown bridge (`export_markdown` / `import_markdown`) exists so the canonical database is not a trap:
+the graph can leave as Logseq 0.x folders and come back.

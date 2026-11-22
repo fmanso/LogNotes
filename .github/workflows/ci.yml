@@ -74,6 +74,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Unit tests
+        run: cargo test --workspace --release --jobs 2
+
       - name: Build
         run: cargo build --release -p lognotes-qt --jobs 2
 

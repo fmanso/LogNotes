@@ -50,3 +50,28 @@ fn backing_up_again_over_the_same_file_rewrites_it() {
     let _ = std::fs::remove_file(&live);
     let _ = std::fs::remove_file(&copy);
 }
+
+#[test]
+fn a_failed_backup_leaves_the_previous_copy_untouched() {
+    let live = temp("lognotes-backup-failure.db");
+    let copy = temp("lognotes-backup-failure-copy.db");
+    let mut store = Store::open(&live).expect("a store");
+    store.ensure_page("Kept").expect("a page");
+    store.backup_into(&copy).expect("the first backup");
+    let before = std::fs::read(&copy).expect("the copy");
+
+    // A directory where the temporary file would go makes the copy fail before it can swap anything.
+    let temp = copy.with_file_name(format!(
+        "{}.tmp",
+        copy.file_name().expect("a name").to_string_lossy()
+    ));
+    std::fs::create_dir(&temp).expect("the blocker");
+
+    assert!(store.backup_into(&copy).is_err(), "the backup must fail");
+    assert_eq!(std::fs::read(&copy).expect("the copy"), before);
+    assert!(Store::open(&copy).is_ok(), "the previous copy still opens");
+
+    let _ = std::fs::remove_dir_all(&temp);
+    let _ = std::fs::remove_file(&live);
+    let _ = std::fs::remove_file(&copy);
+}

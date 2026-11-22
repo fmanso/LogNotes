@@ -99,6 +99,13 @@ pub struct Page {
     pub journal_date: Option<String>,
 }
 
+/// What a page rename changed, for the note the user sees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Renamed {
+    pub blocks: usize,
+    pub mentions: usize,
+}
+
 /// One row of a rendered page: the block plus where it sits in the tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockRow {
@@ -110,6 +117,8 @@ pub struct BlockRow {
     pub marker: Option<Marker>,
     pub scheduled_date: Option<String>,
     pub collapsed: bool,
+    /// How many direct children the block has; a fold control is drawn only when this is nonzero.
+    pub child_count: usize,
 }
 
 /// One block a search matched, with where it lives and the window of text that matched.

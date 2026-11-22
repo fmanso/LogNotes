@@ -225,6 +225,47 @@ pub fn link_at(text: &str, byte_offset: usize) -> Option<LinkRef> {
         .find(|link| link.start <= byte_offset && byte_offset < link.end)
 }
 
+/// An unclosed `[[…` under the caret, for link completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenLink {
+    pub start: usize,
+    pub end: usize,
+    pub query: String,
+}
+
+/// The unclosed `[[` the caret sits after, outside code, or `None`.
+///
+/// The start and end are byte offsets. The bridge turns them into UTF-16 positions for QML.
+pub fn open_link(text: &str, byte_offset: usize) -> Option<OpenLink> {
+    let offset = byte_offset.min(text.len());
+    if !text.is_char_boundary(offset) || in_fence(text, offset) {
+        return None;
+    }
+    let scan = scan(text);
+    let in_code = |at: usize| {
+        scan.spans
+            .iter()
+            .any(|span| span.style.contains(Style::CODE) && span.start <= at && at < span.end)
+    };
+    if in_code(offset) {
+        return None;
+    }
+
+    let start = text[..offset].rfind("[[")?;
+    if in_code(start) {
+        return None;
+    }
+    let query = &text[start + 2..offset];
+    if query.contains("]]") || query.contains('\n') || query.contains('\r') {
+        return None;
+    }
+    Some(OpenLink {
+        start,
+        end: offset,
+        query: query.to_string(),
+    })
+}
+
 /// Render a block as one line of escaped HTML for a read-only row: syntax marks are dropped, the rest
 /// is styled, and links carry their target as an href.
 ///
@@ -1090,5 +1131,25 @@ mod tests {
     #[test]
     fn html_keeps_a_multi_line_block_on_one_line() {
         assert_eq!(to_html("first\nsecond", &INK), "first second");
+    }
+
+    #[test]
+    fn an_open_link_is_found_only_outside_code() {
+        let text = "see [[My Pro";
+        let open = open_link(text, text.len()).expect("the token");
+        assert_eq!(open.start, 4);
+        assert_eq!(open.query, "My Pro");
+
+        let multiple = "[[A]] and [[B";
+        let open = open_link(multiple, multiple.len()).expect("the last token");
+        assert_eq!(&multiple[open.start..], "[[B");
+
+        assert!(open_link("[[My]]", 6).is_none(), "a closed link is not open");
+        assert!(open_link("[[My\n", 5).is_none(), "a link does not cross a line");
+        assert!(open_link("`[[My`", 6).is_none(), "inline code is not a link");
+        assert!(
+            open_link("```\n[[My\n", 12).is_none(),
+            "a fence is not a link"
+        );
     }
 }

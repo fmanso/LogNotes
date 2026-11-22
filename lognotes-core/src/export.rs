@@ -5,7 +5,6 @@
 //! the shape Logseq itself reads, and the reader is tolerant of the shapes a real Logseq folder holds
 //! (properties it does not understand, tabs, deeper indentation, deadlines).
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +18,23 @@ pub struct Moved {
     pub pages: usize,
     pub days: usize,
     pub blocks: usize,
+}
+
+/// How an import treats the graph it is entering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMode {
+    /// Replace the blocks of every page and day the folder names; leave the rest alone. Re-importing the
+    /// same folder is idempotent.
+    Merge,
+    /// Clear every block first, then write the folder. Pages not named by the folder remain, empty.
+    ReplaceAll,
+}
+
+/// One page or day read from a folder, before anything is written.
+pub(crate) struct ParsedPage {
+    pub(crate) name: String,
+    pub(crate) journal_date: Option<String>,
+    pub(crate) bullets: Vec<Bullet>,
 }
 
 /// Write every page and every written day as Markdown under `directory`.
@@ -59,32 +75,52 @@ pub fn export_markdown(store: &Store, directory: &Path) -> Result<Moved> {
 }
 
 /// Read a Logseq 0.x folder — `journals/` and `pages/` of nested bullets — into the store.
-pub fn import_markdown(store: &mut Store, directory: &Path) -> Result<Moved> {
-    let mut moved = Moved::default();
+pub fn import_markdown(store: &mut Store, directory: &Path, mode: ImportMode) -> Result<Moved> {
+    let pages = read_folder(directory)?;
+    store.import_pages(&pages, mode)
+}
+
+/// Parse every file in the folder before anything is written, so an unreadable file cannot leave a
+/// half-imported graph.
+pub(crate) fn read_folder(directory: &Path) -> Result<Vec<ParsedPage>> {
+    let mut pages = Vec::new();
 
     for file in markdown_files(&directory.join("journals"))? {
         let Some(date) = day_of(&file) else {
             continue;
         };
-        let page = store.ensure_journal_page(&date)?;
-        moved.blocks += write_blocks(store, page, &file)?;
-        moved.days += 1;
+        let text = read(&file)?;
+        pages.push(ParsedPage {
+            name: date.clone(),
+            journal_date: Some(date),
+            bullets: parse(&text),
+        });
     }
 
     for file in markdown_files(&directory.join("pages"))? {
         let Some(name) = file.file_stem().and_then(|name| name.to_str()) else {
             continue;
         };
-        let name = name.replace("%2F", "/").replace("%3A", ":");
+        let name = name
+            .replace("%2F", "/")
+            .replace("%3A", ":")
+            .replace("%5C", "\\");
         if name.trim().is_empty() {
             continue;
         }
-        let page = store.ensure_page(&name)?;
-        moved.blocks += write_blocks(store, page, &file)?;
-        moved.pages += 1;
+        let text = read(&file)?;
+        pages.push(ParsedPage {
+            name,
+            journal_date: None,
+            bullets: parse(&text),
+        });
     }
 
-    Ok(moved)
+    Ok(pages)
+}
+
+fn read(file: &Path) -> Result<String> {
+    fs::read_to_string(file).map_err(|error| Error::Backup(format!("{}: {error}", file.display())))
 }
 
 /// The `.md` files in a folder, sorted so a run is repeatable.
@@ -146,49 +182,11 @@ fn render_page(blocks: &[crate::BlockRow]) -> String {
 }
 
 /// One bullet per block, with its children nested under it.
-struct Bullet {
-    depth: usize,
-    marker: Option<Marker>,
-    scheduled: Option<String>,
-    content: String,
-}
-
-/// Read a page's bullets and write them as blocks, returning how many blocks were written.
-fn write_blocks(store: &mut Store, page: i64, file: &Path) -> Result<usize> {
-    let text = fs::read_to_string(file).map_err(|error| Error::Backup(error.to_string()))?;
-    let bullets = parse(&text);
-
-    // The last block written at each depth, so a bullet becomes the next sibling of the one before it at
-    // its own level, or the child of the nearest shallower one.
-    let mut written = 0;
-    let mut last_at_depth: HashMap<usize, i64> = HashMap::new();
-    let mut order: Vec<i64> = Vec::new();
-
-    for bullet in bullets {
-        let after = if bullet.depth == 0 {
-            order.last().copied()
-        } else {
-            last_at_depth.get(&(bullet.depth - 1)).copied()
-        };
-        let id = store.insert_block(page, after, &bullet.content)?;
-        if bullet.depth == 0 {
-            order.push(id);
-        } else {
-            // `after` places it beside the nearest shallower block; one indent makes it that block's child,
-            // which is the depth the file said.
-            store.indent(id)?;
-        }
-        if let Some(marker) = bullet.marker {
-            store.set_marker(id, Some(marker))?;
-        }
-        if let Some(date) = bullet.scheduled.as_deref() {
-            store.set_scheduled(id, Some(date))?;
-        }
-        last_at_depth.insert(bullet.depth, id);
-        written += 1;
-    }
-
-    Ok(written)
+pub(crate) struct Bullet {
+    pub(crate) depth: usize,
+    pub(crate) marker: Option<Marker>,
+    pub(crate) scheduled: Option<String>,
+    pub(crate) content: String,
 }
 
 /// The bullets in a Markdown page, tolerantly: tabs or spaces, any indent step, properties it does not
@@ -297,13 +295,6 @@ fn file_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(name);
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("a directory");
-        path
-    }
-
     #[test]
     fn a_page_is_written_as_nested_bullets_with_markers_and_schedules() {
         let blocks = vec![
@@ -316,6 +307,7 @@ mod tests {
                 marker: Some(Marker::Todo),
                 scheduled_date: Some("2026-11-05".to_string()),
                 collapsed: false,
+                child_count: 0,
             },
             crate::BlockRow {
                 id: 2,
@@ -326,6 +318,7 @@ mod tests {
                 marker: None,
                 scheduled_date: None,
                 collapsed: false,
+                child_count: 0,
             },
         ];
 
@@ -348,6 +341,7 @@ mod tests {
             marker: None,
             scheduled_date: None,
             collapsed: false,
+            child_count: 0,
         }];
 
         let text = render_page(&blocks);

@@ -6,6 +6,7 @@
 //! view cannot reach the database even by accident.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -14,9 +15,10 @@ use std::thread;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QModelIndex, QString, QUrl, QVariant};
+use fs2::FileExt;
 use lognotes_core::markdown::{self, LinkKind};
 use lognotes_core::{
-    AgendaRow, BlockRow, Marker, ReferenceKind, ReferenceRow, SearchResults, Store,
+    AgendaRow, BlockRow, ImportMode, Marker, ReferenceKind, ReferenceRow, SearchResults, Store,
 };
 
 use crate::diagram::{Diagrams, Drawn};
@@ -24,9 +26,33 @@ use qobject::{Journal, QHash_i32_QByteArray, Role};
 
 /// Where the database lives, set by `main` before the window loads.
 static DATABASE_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// A failure that happened before the window could be created, such as a Windows data move that could
+/// not complete. The model shows it instead of opening an empty graph.
+static STARTUP_ERROR: OnceLock<String> = OnceLock::new();
 
 pub fn set_database_path(path: impl Into<PathBuf>) {
     let _ = DATABASE_PATH.set(path.into());
+}
+
+pub fn set_startup_error(message: impl Into<String>) {
+    let _ = STARTUP_ERROR.set(message.into());
+}
+
+/// Take the one writer lock for a data folder. The OS releases it when the returned handle is dropped,
+/// including when the process crashes, so there is no stale file for a person to remove.
+pub fn lock_data_folder(database: &Path) -> std::io::Result<File> {
+    let name = database
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("lognotes.db");
+    let path = database.with_file_name(format!("{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.try_lock_exclusive()?;
+    Ok(file)
 }
 
 /// How many days each lazy chunk of the column covers.
@@ -106,6 +132,12 @@ pub mod qobject {
         Diagram,
         /// One line explaining why a diagram could not be drawn.
         DiagramError,
+        /// Whether a block's children are folded away.
+        Collapsed,
+        /// Whether a block has any children.
+        Foldable,
+        /// How many direct children a block has.
+        Children,
     }
 
     unsafe extern "RustQt" {
@@ -123,11 +155,19 @@ pub mod qobject {
         #[qproperty(i32, loaded_days)]
         #[qproperty(QString, sidebar)]
         #[qproperty(bool, page_favourite)]
+        /// How many blocks explicitly link to the page in view; deletion is refused while nonzero.
+        #[qproperty(i32, page_linked)]
+        /// The pages and written days, as JSON, for the move picker and link completion.
+        #[qproperty(QString, page_names)]
         #[qproperty(i32, focus_row)]
         /// What the settings page did last: "Copied to …", "Exported 3 pages…", or why it could not.
         #[qproperty(QString, note)]
-        /// The backups there are, newest first, as `[{"name": "…", "bytes": 1234}]`.
+        /// The build version, from `CARGO_PKG_VERSION`; shown in the About section.
+        #[qproperty(QString, version)]
+        /// The backups there are, newest first, as `[{"name": "…", "bytes": 1234, "kind": "…", "path": "…"}]`.
         #[qproperty(QString, backups)]
+        /// Whether this instance may replace the live database: true once it holds the data-folder lock.
+        #[qproperty(bool, can_restore)]
         /// Where the notes live, and the folder holding it — shown and opened from the settings page.
         #[qproperty(QString, data_path)]
         #[qproperty(QString, backup_path)]
@@ -170,6 +210,14 @@ pub mod qobject {
         #[qinvokable]
         fn import_from(self: Pin<&mut Self>, directory: &QString);
 
+        /// Read a Logseq 0.x folder, clearing every block first.
+        #[qinvokable]
+        fn import_replace_all(self: Pin<&mut Self>, directory: &QString);
+
+        /// Replace the notes with a backup file. The current database is saved before the swap.
+        #[qinvokable]
+        fn restore_backup(self: Pin<&mut Self>, path: &QString);
+
         /// Whether exporting into `directory` would replace notes that are already there.
         #[qinvokable]
         fn folder_has_notes(self: Pin<&mut Self>, directory: &QString) -> bool;
@@ -193,8 +241,30 @@ pub mod qobject {
         #[qinvokable]
         fn outdent(self: Pin<&mut Self>, row: i32);
 
+        /// Swap the block at `row` with its previous or next sibling.
+        #[qinvokable]
+        fn move_up(self: Pin<&mut Self>, row: i32, text: &QString);
+
+        #[qinvokable]
+        fn move_down(self: Pin<&mut Self>, row: i32, text: &QString);
+
+        /// Place a block immediately after or before another block.
+        #[qinvokable]
+        fn move_block_after(self: Pin<&mut Self>, block_id: i32, anchor_id: i32);
+
+        #[qinvokable]
+        fn move_block_before(self: Pin<&mut Self>, block_id: i32, anchor_id: i32);
+
+        /// Send a block (with its subtree) to the end of a named page or day.
+        #[qinvokable]
+        fn move_block_to_page(self: Pin<&mut Self>, block_id: i32, name: &QString);
+
         #[qinvokable]
         fn remove(self: Pin<&mut Self>, row: i32);
+
+        /// Persist whether the block at `row` has its children folded.
+        #[qinvokable]
+        fn set_collapsed(self: Pin<&mut Self>, row: i32, collapsed: bool);
 
         /// Cycle a block's marker: none → TODO → DOING → DONE → none.
         #[qinvokable]
@@ -234,6 +304,14 @@ pub mod qobject {
         #[qinvokable]
         fn open_page(self: Pin<&mut Self>, name: &QString);
 
+        /// Rename the page in view. The worker answers with a note and, on success, the new page.
+        #[qinvokable]
+        fn rename_page(self: Pin<&mut Self>, name: &QString);
+
+        /// Delete the page in view. The worker answers with a note and, on success, the journal.
+        #[qinvokable]
+        fn delete_page(self: Pin<&mut Self>);
+
         /// The link under `position` in `text`, as `page:<name>` for a page link or a tag and the URL
         /// itself for an external one. Empty when the caret is not on a link.
         ///
@@ -241,6 +319,10 @@ pub mod qobject {
         /// still be clickable.
         #[qinvokable]
         fn link_at(self: Pin<&mut Self>, text: &QString, position: i32) -> QString;
+
+        /// The unclosed `[[` under the caret as JSON `{start,end,query}` in UTF-16 units, or empty.
+        #[qinvokable]
+        fn link_query(self: Pin<&mut Self>, text: &QString, position: i32) -> QString;
 
         /// Whether `position` in `text` sits inside a code fence, which is what makes Enter add a line
         /// to the block instead of starting a new one.
@@ -342,6 +424,9 @@ struct Row {
     /// A block's drawn diagram, as a `file://` URL.
     diagram: String,
     diagram_error: String,
+    collapsed: bool,
+    /// How many direct children the block has; zero for every non-block row.
+    children: u32,
 }
 
 impl Row {
@@ -351,7 +436,7 @@ impl Row {
 }
 
 /// What the column is showing.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Debug)]
 enum Mode {
     #[default]
     Journal,
@@ -366,8 +451,11 @@ pub struct JournalRust {
     mode: Mode,
     dates: Vec<String>,
     worker: Option<Sender<Job>>,
+    /// The data-folder lock, held for the life of the process.
+    lock: Option<File>,
     error: QString,
     ready: bool,
+    can_restore: bool,
     can_undo: bool,
     can_redo: bool,
     /// Bumped on every applied snapshot. QML restores the caret from this: the row count alone does not
@@ -386,12 +474,17 @@ pub struct JournalRust {
     sidebar: QString,
     /// Whether the page in view is starred, for the star in its header.
     page_favourite: bool,
+    /// How many blocks explicitly link to the page in view.
+    page_linked: i32,
+    /// The page/day names as JSON, for the move picker and link completion.
+    page_names: QString,
     /// A block a search asked for, to be turned into a row once a snapshot containing it arrives.
     pending_focus: i32,
     /// The row the view should put the caret in, or -1.
     focus_row: i32,
     /// What the settings page did last, and the backups it lists.
     note: QString,
+    version: QString,
     backups: QString,
     /// The database file, its folder, and the backups folder — as text and as `file://` URLs.
     data_path: QString,
@@ -435,6 +528,12 @@ enum Command {
     SetMarkerWithContent { block_id: i32, marker: Option<Marker>, text: String },
     SetScheduled { block_id: i32, date: Option<String> },
     SetScheduledWithContent { block_id: i32, date: Option<String>, text: String },
+    MoveUp { block_id: i32, text: String },
+    MoveDown { block_id: i32, text: String },
+    MoveAfter { block_id: i32, anchor_id: i32 },
+    MoveBefore { block_id: i32, anchor_id: i32 },
+    MoveToPage { block_id: i32, name: String },
+    SetCollapsed { block_id: i32, collapsed: bool },
     Undo,
     Redo,
 }
@@ -455,13 +554,29 @@ enum SettingsAction {
     Refresh,
     BackUp,
     Export(String),
-    Import(String),
+    Import(String, ImportMode),
+    /// Replace the live database with a chosen backup. The worker saves the current one first.
+    Restore(String),
+}
+
+/// A change to the page in view, which may also change what page the view should show.
+enum PageActionKind {
+    Rename(String),
+    Delete,
 }
 
 enum Job {
     /// The quick switcher's query: no snapshot, just an answer.
     Search { query: String, queue: CxxQtThread<Journal> },
     Start {
+        dates: Vec<String>,
+        mode: Mode,
+        queue: CxxQtThread<Journal>,
+    },
+    /// Rename or delete the page in view. A refusal answers with a note; a success answers with the
+    /// snapshot for the view that should follow.
+    PageAction {
+        action: PageActionKind,
         dates: Vec<String>,
         mode: Mode,
         queue: CxxQtThread<Journal>,
@@ -496,6 +611,8 @@ struct PageView {
     journal_date: Option<String>,
     blocks: Vec<BlockRow>,
     references: Vec<ReferenceRow>,
+    /// How many blocks explicitly link to this page; page deletion is refused while this is nonzero.
+    linked_count: usize,
 }
 
 /// What the worker sends back to the GUI thread.
@@ -517,6 +634,14 @@ struct Outcome {
     search_rows: Vec<Row>,
     /// Whether the page in view is starred.
     page_favourite: bool,
+    /// A result to show under the column: a rename's counts, a deletion, or why a page action was
+    /// refused. `None` leaves the previous note in place.
+    note: Option<String>,
+    /// The pages and written days, as JSON, for the move picker and link completion.
+    page_names: String,
+    /// The view this snapshot describes. The worker can change it (a rename, a delete, or a page that
+    /// disappeared after undo), so the model follows this rather than the mode it sent.
+    mode: Mode,
 
     ready: bool,
     can_undo: bool,
@@ -585,6 +710,9 @@ impl qobject::Journal {
             Role::Html => QVariant::from(&QString::from(row.html.as_str())),
             Role::Diagram => QVariant::from(&QString::from(row.diagram.as_str())),
             Role::DiagramError => QVariant::from(&QString::from(row.diagram_error.as_str())),
+            Role::Collapsed => QVariant::from(&row.collapsed),
+            Role::Foldable => QVariant::from(&(row.children > 0)),
+            Role::Children => QVariant::from(&(row.children as i32)),
             _ => QVariant::default(),
         }
     }
@@ -604,11 +732,56 @@ impl qobject::Journal {
         hash.insert(Role::Html.repr, QByteArray::from("html"));
         hash.insert(Role::Diagram.repr, QByteArray::from("diagram"));
         hash.insert(Role::DiagramError.repr, QByteArray::from("diagramError"));
+        hash.insert(Role::Collapsed.repr, QByteArray::from("collapsed"));
+        hash.insert(Role::Foldable.repr, QByteArray::from("foldable"));
+        hash.insert(Role::Children.repr, QByteArray::from("children"));
         hash
     }
 
     fn start(mut self: Pin<&mut Self>) {
         self.as_mut().fill_paths();
+
+        if let Some(error) = STARTUP_ERROR.get() {
+            self.as_mut().set_error(QString::from(error.as_str()));
+            self.as_mut().set_ready(false);
+            self.as_mut().set_can_restore(false);
+            self.as_mut().bump_revision();
+            return;
+        }
+
+        // One writer per data folder. The handle lives in this model, so it is released when the
+        // process exits or crashes, not by a stale file somebody has to clean up.
+        if self.lock.is_none() {
+            let Some(database) = DATABASE_PATH.get() else {
+                self.as_mut()
+                    .set_error(QString::from("no database path was configured"));
+                self.as_mut().set_ready(false);
+                self.as_mut().set_can_restore(false);
+                self.as_mut().bump_revision();
+                return;
+            };
+            match lock_data_folder(database) {
+                Ok(lock) => {
+                    self.as_mut().rust_mut().lock = Some(lock);
+                    crate::diagnostics::info("data-folder lock acquired");
+                }
+                Err(error) => {
+                    let message = if error.kind() == std::io::ErrorKind::WouldBlock {
+                        "LogNotes is already running. Close the other window and retry.".to_string()
+                    } else {
+                        format!("LogNotes could not lock its data folder: {error}")
+                    };
+                    crate::diagnostics::error(&message);
+                    self.as_mut().set_error(QString::from(message.as_str()));
+                    self.as_mut().set_ready(false);
+                    self.as_mut().set_can_restore(false);
+                    self.as_mut().bump_revision();
+                    return;
+                }
+            }
+        }
+        self.as_mut().set_can_restore(true);
+
         let dates = if self.dates.is_empty() {
             let dates = today_chunk(CHUNK_DAYS);
             self.as_mut().rust_mut().dates = dates.clone();
@@ -631,6 +804,8 @@ impl qobject::Journal {
     /// Where the notes and the backups are, in the two spellings the page needs: a path to show and a URL
     /// to open. Both are fixed for the life of the process.
     fn fill_paths(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .set_version(QString::from(env!("CARGO_PKG_VERSION")));
         let Some(database) = DATABASE_PATH.get() else {
             return;
         };
@@ -656,6 +831,25 @@ impl qobject::Journal {
         })
     }
 
+    fn send_page_action(mut self: Pin<&mut Self>, action: PageActionKind) -> bool {
+        let queue = self.as_mut().qt_thread();
+        self.send(Job::PageAction {
+            action,
+            dates: self.dates.clone(),
+            mode: self.mode.clone(),
+            queue,
+        })
+    }
+
+    fn rename_page(mut self: Pin<&mut Self>, name: &QString) {
+        self.as_mut()
+            .send_page_action(PageActionKind::Rename(name.to_string()));
+    }
+
+    fn delete_page(mut self: Pin<&mut Self>) {
+        self.as_mut().send_page_action(PageActionKind::Delete);
+    }
+
     fn open_settings(mut self: Pin<&mut Self>) {
         self.as_mut().fill_paths();
         self.as_mut().send_settings(SettingsAction::Refresh);
@@ -672,10 +866,22 @@ impl qobject::Journal {
 
     fn import_from(mut self: Pin<&mut Self>, directory: &QString) {
         self.as_mut()
-            .send_settings(SettingsAction::Import(directory.to_string()));
+            .send_settings(SettingsAction::Import(directory.to_string(), ImportMode::Merge));
     }
 
-    fn folder_has_notes(mut self: Pin<&mut Self>, directory: &QString) -> bool {
+    fn import_replace_all(mut self: Pin<&mut Self>, directory: &QString) {
+        self.as_mut().send_settings(SettingsAction::Import(
+            directory.to_string(),
+            ImportMode::ReplaceAll,
+        ));
+    }
+
+    fn restore_backup(mut self: Pin<&mut Self>, path: &QString) {
+        self.as_mut()
+            .send_settings(SettingsAction::Restore(path.to_string()));
+    }
+
+    fn folder_has_notes(self: Pin<&mut Self>, directory: &QString) -> bool {
         // Only the two folders an export writes into can be replaced by one.
         ["pages", "journals"].iter().any(|folder| {
             let dir = Path::new(&directory.to_string()).join(folder);
@@ -775,6 +981,50 @@ impl qobject::Journal {
         }
     }
 
+    fn move_up(mut self: Pin<&mut Self>, row: i32, text: &QString) {
+        if let Some(block_id) = self.block_at(row) {
+            self.as_mut().rust_mut().pending_focus = block_id;
+            self.as_mut().dispatch(Some(Command::MoveUp {
+                block_id,
+                text: text.to_string(),
+            }));
+        }
+    }
+
+    fn move_down(mut self: Pin<&mut Self>, row: i32, text: &QString) {
+        if let Some(block_id) = self.block_at(row) {
+            self.as_mut().rust_mut().pending_focus = block_id;
+            self.as_mut().dispatch(Some(Command::MoveDown {
+                block_id,
+                text: text.to_string(),
+            }));
+        }
+    }
+
+    fn move_block_after(mut self: Pin<&mut Self>, block_id: i32, anchor_id: i32) {
+        self.as_mut().rust_mut().pending_focus = block_id;
+        self.as_mut().dispatch(Some(Command::MoveAfter {
+            block_id,
+            anchor_id,
+        }));
+    }
+
+    fn move_block_before(mut self: Pin<&mut Self>, block_id: i32, anchor_id: i32) {
+        self.as_mut().rust_mut().pending_focus = block_id;
+        self.as_mut().dispatch(Some(Command::MoveBefore {
+            block_id,
+            anchor_id,
+        }));
+    }
+
+    fn move_block_to_page(mut self: Pin<&mut Self>, block_id: i32, name: &QString) {
+        self.as_mut().rust_mut().pending_focus = block_id;
+        self.as_mut().dispatch(Some(Command::MoveToPage {
+            block_id,
+            name: name.to_string(),
+        }));
+    }
+
     fn outdent(mut self: Pin<&mut Self>, row: i32) {
         if let Some(block_id) = self.block_at(row) {
             self.as_mut().dispatch(Some(Command::Outdent { block_id }));
@@ -784,6 +1034,16 @@ impl qobject::Journal {
     fn remove(mut self: Pin<&mut Self>, row: i32) {
         if let Some(block_id) = self.block_at(row) {
             self.as_mut().dispatch(Some(Command::Delete { block_id }));
+        }
+    }
+
+    fn set_collapsed(mut self: Pin<&mut Self>, row: i32, collapsed: bool) {
+        if let Some(block_id) = self.block_at(row) {
+            self.as_mut().rust_mut().pending_focus = block_id;
+            self.as_mut().dispatch(Some(Command::SetCollapsed {
+                block_id,
+                collapsed,
+            }));
         }
     }
 
@@ -856,9 +1116,14 @@ impl qobject::Journal {
             return;
         }
         self.as_mut().rust_mut().mode = Mode::Page(name.clone());
-        // Opening a page from a link can name one that was never written: create it, so the click lands
-        // on a page you can type in rather than on an empty view that refuses a keystroke.
-        self.as_mut().dispatch(Some(Command::OpenPage { name }));
+        if lognotes_core::is_date_name(&name) {
+            // A date is an address, not a document: opening one must not write a page row.
+            self.as_mut().dispatch(None);
+        } else {
+            // Opening a page from a link can name one that was never written: create it, so the click
+            // lands on a page you can type in rather than on an empty view that refuses a keystroke.
+            self.as_mut().dispatch(Some(Command::OpenPage { name }));
+        }
     }
 
     fn open_search(mut self: Pin<&mut Self>, query: &QString) {
@@ -895,6 +1160,12 @@ impl qobject::Journal {
             LinkKind::Page | LinkKind::Tag => format!("page:{}", link.target),
         };
         QString::from(target.as_str())
+    }
+
+    fn link_query(self: Pin<&mut Self>, text: &QString, position: i32) -> QString {
+        let text = text.to_string();
+        let json = link_query_json(&text, position.max(0) as u32);
+        QString::from(json.as_str())
     }
 
     fn search(mut self: Pin<&mut Self>, query: &QString) {
@@ -1000,6 +1271,11 @@ impl qobject::Journal {
 
     /// Called on the GUI thread once the worker has finished: swap in the new rows.
     fn apply(mut self: Pin<&mut Self>, outcome: Outcome) {
+        self.as_mut().rust_mut().mode = outcome.mode.clone();
+        if let Some(note) = &outcome.note {
+            self.as_mut().set_note(QString::from(note.as_str()));
+        }
+
         if let Some(error) = &outcome.error {
             self.as_mut().set_error(QString::from(error.as_str()));
             self.as_mut().set_ready(false);
@@ -1041,6 +1317,15 @@ impl qobject::Journal {
                 self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
                 self.as_mut().set_view(QString::from(outcome.view));
                 self.as_mut().set_page_favourite(outcome.page_favourite);
+                self.as_mut().set_page_linked(
+                    outcome
+                        .page
+                        .as_ref()
+                        .map(|page| page.linked_count as i32)
+                        .unwrap_or(0),
+                );
+                self.as_mut()
+                    .set_page_names(QString::from(outcome.page_names.as_str()));
                 self.as_mut().set_focus_row(focus);
                 self.as_mut().bump_revision();
                 return;
@@ -1077,6 +1362,9 @@ impl qobject::Journal {
         self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
         self.as_mut().set_view(QString::from(outcome.view));
         self.as_mut().set_page_favourite(outcome.page_favourite);
+        self.as_mut().set_page_linked(0);
+        self.as_mut()
+            .set_page_names(QString::from(outcome.page_names.as_str()));
         self.as_mut().set_focus_row(focus);
         self.as_mut().bump_revision();
     }
@@ -1084,6 +1372,49 @@ impl qobject::Journal {
     fn bump_revision(mut self: Pin<&mut Self>) {
         let next = self.revision.wrapping_add(1);
         self.as_mut().set_revision(next);
+    }
+}
+
+fn apply_page_action(
+    store: &mut Store,
+    mode: &Mode,
+    action: PageActionKind,
+) -> (String, Option<Mode>) {
+    let Mode::Page(page_name) = mode else {
+        return ("no page is in view".to_string(), None);
+    };
+    let page = store.page_by_name(page_name).ok().flatten();
+
+    match action {
+        PageActionKind::Rename(new_name) => match page {
+            Some(page) => match store.rename_page(page.id, &new_name) {
+                Ok(changed) => {
+                    let note = format!(
+                        "Renamed to {new_name}; {} blocks rewritten, {} plain mentions left",
+                        changed.blocks, changed.mentions
+                    );
+                    (note, Some(Mode::Page(new_name)))
+                }
+                Err(error) => (error.to_string(), None),
+            },
+            None => (
+                "that page is no longer there".to_string(),
+                Some(Mode::Journal),
+            ),
+        },
+        PageActionKind::Delete => match page {
+            Some(page) => {
+                let name = page.name.clone();
+                match store.delete_page(page.id) {
+                    Ok(()) => (format!("Deleted {name}"), Some(Mode::Journal)),
+                    Err(error) => (error.to_string(), None),
+                }
+            }
+            None => (
+                "that page is no longer there".to_string(),
+                Some(Mode::Journal),
+            ),
+        },
     }
 }
 
@@ -1096,8 +1427,13 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
         match job {
             Job::Start { dates, mode, queue } => {
                 let opened = match DATABASE_PATH.get() {
-                    // The storage error already names the file, so it is not appended again.
-                    Some(path) => Store::open(path).map_err(|error| error.to_string()),
+                    // The storage error already names the file, so it is not appended again. Opening
+                    // through the backup-aware path makes an upgrade write the pre-migration copy.
+                    Some(path) => Store::open_with_migration_backup(
+                        path,
+                        crate::backup::directory(path),
+                    )
+                    .map_err(|error| error.to_string()),
                     None => Err("no database path was configured".to_string()),
                 };
                 match opened {
@@ -1105,32 +1441,73 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         // A copy before any typing, at most once a day. Failing to write one must not stop
                         // the notes from opening.
                         if let Some(path) = DATABASE_PATH.get() {
+                            crate::diagnostics::info(&format!("opened {}", path.display()));
+                            if let Some(copy) = opened.migration_copy() {
+                                crate::diagnostics::info(&format!(
+                                    "pre-migration copy: {}",
+                                    copy.display()
+                                ));
+                            }
                             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                            let _ = crate::backup::daily(&opened, path, &today);
+                            match crate::backup::daily(&opened, path, &today) {
+                                Some(copy) => crate::diagnostics::info(&format!(
+                                    "daily backup: {}",
+                                    copy.display()
+                                )),
+                                None => crate::diagnostics::warn("could not write the daily backup"),
+                            }
                         }
                         let theme = theme_name(&opened);
                         let outcome = snapshot(&opened, &dates, &mode, &mut diagrams, &theme);
                         store = Some(opened);
                         deliver(queue, outcome);
                     }
-                    Err(error) => deliver(
-                        queue,
-                        Outcome {
-                            error: Some(error),
-                            days: Vec::new(),
-                            agenda: Vec::new(),
-                            diagrams: HashMap::new(),
-                            page: None,
-                            sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
-                            theme: "light".to_string(),
-                            view: "journal",
-                            search_rows: Vec::new(),
-                            page_favourite: false,
-                            ready: false,
-                            can_undo: false,
-                            can_redo: false,
-                        },
-                    ),
+                    Err(error) => {
+                        crate::diagnostics::error(&format!("could not open the database: {error}"));
+                        deliver(
+                            queue,
+                            Outcome {
+                                error: Some(error),
+                                days: Vec::new(),
+                                agenda: Vec::new(),
+                                diagrams: HashMap::new(),
+                                page: None,
+                                sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
+                                theme: "light".to_string(),
+                                view: "journal",
+                                search_rows: Vec::new(),
+                                page_favourite: false,
+                                note: None,
+                                page_names: "[]".to_string(),
+                                mode: Mode::Journal,
+                                ready: false,
+                                can_undo: false,
+                                can_redo: false,
+                            },
+                        )
+                    }
+                }
+            }
+            Job::PageAction {
+                action,
+                dates,
+                mode,
+                queue,
+            } => {
+                let Some(store) = store.as_mut() else {
+                    continue;
+                };
+                let (note, next) = apply_page_action(store, &mode, action);
+
+                let backups = backups_json();
+                let queued = note.clone();
+                let _ = queue.clone().queue(move |journal: Pin<&mut Journal>| {
+                    journal.apply_settings(queued, backups)
+                });
+                if let Some(next) = next {
+                    let theme = theme_name(store);
+                    let outcome = snapshot(store, &dates, &next, &mut diagrams, &theme);
+                    deliver(queue, outcome);
                 }
             }
             Job::Search { query, queue } => {
@@ -1149,6 +1526,103 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 mode,
                 queue,
             } => {
+                if let SettingsAction::Restore(backup) = &action {
+                    let Some(database) = DATABASE_PATH.get() else {
+                        continue;
+                    };
+                    let backups_dir = crate::backup::directory(database);
+                    let chosen = Path::new(backup.as_str());
+                    let chose = chosen
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| backup.clone());
+                    crate::diagnostics::info(&format!("restoring {}", chosen.display()));
+
+                    match crate::backup::restore_database(
+                        store.as_ref(),
+                        database,
+                        chosen,
+                        &backups_dir,
+                    ) {
+                        Ok(prepared) => {
+                            let pre_restore = prepared.pre_restore().to_path_buf();
+                            // The swap needs the file, not the open connection.
+                            drop(store.take());
+                            let applied = prepared.apply();
+                            let applied_ok = applied.is_ok();
+                            let saved = applied
+                                .as_ref()
+                                .map(|path| path.clone())
+                                .unwrap_or_else(|_| pre_restore.clone());
+
+                            let reopened = match applied {
+                                Ok(_) => Store::open_with_migration_backup(database, &backups_dir),
+                                Err(_) => {
+                                    // `apply` already tried to put the previous file back; copy the
+                                    // saved copy over it once more before giving up.
+                                    let _ = std::fs::copy(&pre_restore, database);
+                                    Store::open_with_migration_backup(database, &backups_dir)
+                                }
+                            };
+                            match reopened {
+                                Ok(opened) => {
+                                    store = Some(opened);
+                                    let note = if applied_ok {
+                                        format!(
+                                            "Restored {chose}; previous database saved as {}",
+                                            saved.display()
+                                        )
+                                    } else {
+                                        format!(
+                                            "could not finish the restore; previous database saved as {}",
+                                            saved.display()
+                                        )
+                                    };
+                                    if applied_ok {
+                                        crate::diagnostics::info(&note);
+                                    } else {
+                                        crate::diagnostics::error(&note);
+                                    }
+                                    let backups = backups_json();
+                                    let _ = queue.clone().queue(move |journal: Pin<&mut Journal>| {
+                                        journal.apply_settings(note, backups)
+                                    });
+                                    let theme = theme_name(store.as_ref().expect("just opened"));
+                                    let outcome = snapshot(
+                                        store.as_ref().expect("just opened"),
+                                        &dates,
+                                        &mode,
+                                        &mut diagrams,
+                                        &theme,
+                                    );
+                                    deliver(queue, outcome);
+                                }
+                                Err(error) => {
+                                    let message = format!(
+                                        "could not open the restored notes: {error}; the previous database is at {}",
+                                        saved.display()
+                                    );
+                                    crate::diagnostics::error(&message);
+                                    deliver(queue, failed_outcome(message));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let note = format!("could not restore: {error}");
+                            crate::diagnostics::error(&note);
+                            if store.is_some() {
+                                // The current store was never touched: say so where the user asked.
+                                let backups = backups_json();
+                                let _ = queue.clone().queue(move |journal: Pin<&mut Journal>| {
+                                    journal.apply_settings(note, backups)
+                                });
+                            } else {
+                                deliver(queue, failed_outcome(note));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let Some(store) = store.as_mut() else {
                     continue;
                 };
@@ -1159,32 +1633,49 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                             .get()
                             .and_then(|database| crate::backup::now(store, database));
                         let note = match copied {
-                            Some(path) => (format!("Copied to {}", path.display())),
-                            None => ("could not write a backup".to_string()),
+                            Some(path) => format!("Copied to {}", path.display()),
+                            None => "could not write a backup".to_string(),
                         };
+                        if note.starts_with("could not") {
+                            crate::diagnostics::error(&note);
+                        } else {
+                            crate::diagnostics::info(&note);
+                        }
                         (note, false)
                     }
                     SettingsAction::Export(directory) => {
                         let note = match lognotes_core::export_markdown(store, Path::new(&directory)) {
-                            Ok(moved) => (format!(
+                            Ok(moved) => format!(
                                 "Exported {} pages and {} days to {directory}",
                                 moved.pages, moved.days
-                            )),
+                            ),
                             Err(error) => format!("could not export: {error}"),
                         };
+                        if note.starts_with("could not") {
+                            crate::diagnostics::error(&note);
+                        } else {
+                            crate::diagnostics::info(&note);
+                        }
                         (note, false)
                     }
-                    SettingsAction::Import(directory) => {
-                        let note = match lognotes_core::import_markdown(store, Path::new(&directory)) {
-                            Ok(moved) => (format!(
-                                "Imported {} pages and {} days from {directory}",
-                                moved.pages, moved.days
-                            )),
-                            Err(error) => format!("could not import: {error}"),
-                        };
+                    SettingsAction::Import(directory, mode) => {
+                        let note =
+                            match lognotes_core::import_markdown(store, Path::new(&directory), mode) {
+                                Ok(moved) => format!(
+                                    "Imported {} pages and {} days from {directory}",
+                                    moved.pages, moved.days
+                                ),
+                                Err(error) => format!("could not import: {error}"),
+                            };
+                        if note.starts_with("could not") {
+                            crate::diagnostics::error(&note);
+                        } else {
+                            crate::diagnostics::info(&note);
+                        }
                         // Imported notes are notes: show them without asking for a restart.
                         (note, true)
                     }
+                    SettingsAction::Restore(_) => (String::new(), false),
                 };
                 let backups = backups_json();
                 let _ = queue.clone().queue(move |journal: Pin<&mut Journal>| {
@@ -1215,6 +1706,16 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     Some(command) => run_command(store, command),
                     None => Ok(()),
                 };
+                // A named page can disappear under the view (undoing its rename). Fall back to the
+                // journal rather than leaving an empty page you could type into and recreate.
+                let mut mode = mode;
+                if let Mode::Page(name) = &mode {
+                    if !lognotes_core::is_date_name(name)
+                        && store.page_by_name(name).ok().flatten().is_none()
+                    {
+                        mode = Mode::Journal;
+                    }
+                }
                 let outcome = match run {
                     Ok(()) => {
                         let theme = theme_name(store);
@@ -1231,6 +1732,9 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         view: "journal",
                         search_rows: Vec::new(),
                         page_favourite: false,
+                        note: None,
+                        page_names: page_names_json(store),
+                        mode: mode.clone(),
                         ready: true,
                         can_undo: store.can_undo(),
                         can_redo: store.can_redo(),
@@ -1253,6 +1757,19 @@ fn url_of(path: &Path) -> QString {
 }
 
 /// The backups there are, newest first, as `[{"name": "…", "bytes": 1234}]`.
+fn page_names_json(store: &Store) -> String {
+    let pages = store.pages().unwrap_or_default();
+    let mut out = String::from("[");
+    for (index, page) in pages.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(&page.name));
+    }
+    out.push(']');
+    out
+}
+
 fn backups_json() -> String {
     let copies = DATABASE_PATH
         .get()
@@ -1260,23 +1777,65 @@ fn backups_json() -> String {
         .unwrap_or_default();
 
     let mut out = String::from("[");
-    for (index, path) in copies.iter().rev().enumerate() {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    for (index, copy) in copies.iter().rev().enumerate() {
+        let Some(name) = copy.path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        let bytes = std::fs::metadata(&copy.path).map(|meta| meta.len()).unwrap_or(0);
         if index > 0 {
             out.push(',');
         }
-        // The names are generated here — a date and an extension — so there is nothing to escape.
-        out.push_str(&format!("{{\"name\": \"{name}\", \"bytes\": {bytes}}}"));
+        out.push_str(&format!(
+            "{{\"name\": \"{name}\", \"bytes\": {bytes}, \"kind\": \"{}\", \"path\": {}}}",
+            copy.kind.label(),
+            json_string(&copy.path.to_string_lossy())
+        ));
     }
     out.push(']');
     out
 }
 
+fn failed_outcome(error: String) -> Outcome {
+    Outcome {
+        error: Some(error),
+        days: Vec::new(),
+        agenda: Vec::new(),
+        diagrams: HashMap::new(),
+        page: None,
+        sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
+        theme: "light".to_string(),
+        view: "journal",
+        search_rows: Vec::new(),
+        page_favourite: false,
+        note: None,
+        page_names: "[]".to_string(),
+        mode: Mode::Journal,
+        ready: false,
+        can_undo: false,
+        can_redo: false,
+    }
+}
+
 fn deliver(queue: CxxQtThread<Journal>, outcome: Outcome) {
     let _ = queue.queue(move |journal: Pin<&mut Journal>| journal.apply(outcome));
+}
+
+fn write_if_changed(store: &mut Store, block_id: i32, text: &str) -> Result<(), String> {
+    let page = store
+        .page_of_block(block_id as i64)
+        .map_err(|error| error.to_string())?;
+    let current = store
+        .page_blocks(page.id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|row| row.id == block_id as i64)
+        .map(|row| row.content);
+    if current.as_deref() != Some(text) {
+        store
+            .update_content(block_id as i64, text)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
@@ -1355,6 +1914,32 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
         } => store
             .set_scheduled_with_content(block_id as i64, date.as_deref(), &text)
             .map_err(fail),
+        Command::MoveUp { block_id, text } => {
+            write_if_changed(store, block_id, &text)?;
+            store.move_up(block_id as i64).map_err(fail)
+        }
+        Command::MoveDown { block_id, text } => {
+            write_if_changed(store, block_id, &text)?;
+            store.move_down(block_id as i64).map_err(fail)
+        }
+        Command::MoveAfter {
+            block_id,
+            anchor_id,
+        } => store
+            .move_block_after(block_id as i64, anchor_id as i64)
+            .map_err(fail),
+        Command::MoveBefore {
+            block_id,
+            anchor_id,
+        } => store
+            .move_block_before(block_id as i64, anchor_id as i64)
+            .map_err(fail),
+        Command::MoveToPage { block_id, name } => store
+            .move_block_to_page(block_id as i64, &name)
+            .map_err(fail),
+        Command::SetCollapsed { block_id, collapsed } => store
+            .set_collapsed(block_id as i64, collapsed)
+            .map_err(fail),
         Command::Undo => store.undo().map(|_| ()).map_err(fail),
         Command::Redo => store.redo().map(|_| ()).map_err(fail),
     }
@@ -1386,6 +1971,8 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
                 overdue: false,
                 diagram: String::new(),
                 diagram_error: String::new(),
+                collapsed: false,
+                children: 0,
             });
         }
     }
@@ -1416,6 +2003,9 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
         view: "search",
         search_rows: rows,
         page_favourite: false,
+        note: None,
+        page_names: page_names_json(store),
+        mode: Mode::Search(query.to_string()),
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
@@ -1458,13 +2048,29 @@ fn snapshot(
             ),
             None => (Vec::new(), Vec::new()),
         };
-        let journal_date = page.as_ref().and_then(|page| page.journal_date.clone());
+        let journal_date = page
+            .as_ref()
+            .and_then(|page| page.journal_date.clone())
+            .or_else(|| {
+                // A date can be opened before it has a row: the header still reads as the day, and the
+                // empty page gets a placeholder. The first keystroke creates the row.
+                if lognotes_core::is_date_name(name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            });
+        let linked_count = references
+            .iter()
+            .filter(|row| row.kind == ReferenceKind::Linked)
+            .count();
         let drawn = drawn_for(&blocks, diagrams, theme);
         let view = PageView {
             name: name.clone(),
             journal_date,
             blocks,
             references,
+            linked_count,
         };
         return Outcome {
             error: None,
@@ -1480,6 +2086,9 @@ fn snapshot(
                 (None, Some(page)) => store.is_favourite(page.id).ok().unwrap_or(false),
                 (None, None) => false,
             },
+            note: None,
+            page_names: page_names_json(store),
+            mode: mode.clone(),
             page: Some(view),
             sidebar: sidebar_json(store),
             theme: theme.to_string(),
@@ -1519,6 +2128,9 @@ fn snapshot(
         view: "journal",
         search_rows: Vec::new(),
         page_favourite: false,
+        note: None,
+        page_names: page_names_json(store),
+        mode: mode.clone(),
         ready: true,
         can_undo: store.can_undo(),
         can_redo: store.can_redo(),
@@ -1555,6 +2167,8 @@ fn heading(date: &str) -> Row {
         html: String::new(),
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }
 }
 
@@ -1604,6 +2218,8 @@ fn day_rows(
             overdue: false,
             diagram: diagram.source,
             diagram_error: diagram.error,
+            collapsed: block.collapsed,
+            children: block.child_count as u32,
         }
     }));
     rows
@@ -1624,6 +2240,8 @@ fn page_header(name: &str, journal_date: Option<&str>) -> Row {
         html: String::new(),
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }
 }
 
@@ -1673,6 +2291,8 @@ fn section_row(kind: Kind, text: &str) -> Row {
         html: String::new(),
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }
 }
 
@@ -1694,6 +2314,8 @@ fn reference_row(entry: &ReferenceRow, kind: Kind, theme: &str) -> Row {
         overdue: false,
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }
 }
 
@@ -1812,6 +2434,8 @@ fn agenda_rows(agenda: &[AgendaRow], theme: &str) -> Vec<Row> {
         html: String::new(),
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }];
 
     rows.extend(agenda.iter().map(|entry| Row {
@@ -1830,6 +2454,8 @@ fn agenda_rows(agenda: &[AgendaRow], theme: &str) -> Vec<Row> {
         overdue: entry.overdue,
         diagram: String::new(),
         diagram_error: String::new(),
+        collapsed: false,
+        children: 0,
     }));
     rows
 }
@@ -1840,6 +2466,19 @@ fn today_chunk(count: u32) -> Vec<String> {
 }
 
 /// A QML caret position counts UTF-16 units; the markdown scanner counts bytes.
+fn link_query_json(text: &str, position: u32) -> String {
+    let bytes = byte_offset(text, position);
+    let Some(open) = markdown::open_link(text, bytes) else {
+        return String::new();
+    };
+    let start = text[..open.start].encode_utf16().count();
+    let end = text[..open.end].encode_utf16().count();
+    format!(
+        "{{\"start\":{start},\"end\":{end},\"query\":{}}}",
+        json_string(&open.query)
+    )
+}
+
 fn byte_offset(text: &str, position: u32) -> usize {
     let mut utf16 = 0;
     for (byte, character) in text.char_indices() {
@@ -1886,6 +2525,7 @@ mod tests {
             marker: None,
             scheduled_date: None,
             collapsed: false,
+            child_count: 0,
         }
     }
 
@@ -1964,6 +2604,156 @@ mod tests {
 
     fn session() -> Store {
         Store::open_in_memory().expect("in-memory store")
+    }
+
+    #[test]
+    fn restore_is_closed_until_start_grants_it() {
+        let journal = JournalRust::default();
+        assert!(!journal.can_restore);
+    }
+
+    #[test]
+    fn a_data_folder_has_one_writer_lock() {
+        let dir = std::env::temp_dir().join(format!("lognotes-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let database = dir.join("lognotes.db");
+
+        let first = lock_data_folder(&database).expect("the first lock");
+        assert!(
+            lock_data_folder(&database).is_err(),
+            "a second handle cannot take the same folder"
+        );
+        drop(first);
+        let after = lock_data_folder(&database).expect("the lock is released with its handle");
+        drop(after);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unwritten_date_is_a_page_without_a_row() {
+        let store = session();
+        let mut diagrams = Diagrams::default();
+        let outcome = snapshot(
+            &store,
+            &[],
+            &Mode::Page("2027-01-01".to_string()),
+            &mut diagrams,
+            "light",
+        );
+        let page = outcome.page.expect("a day page");
+        assert_eq!(page.journal_date.as_deref(), Some("2027-01-01"));
+        assert!(page.blocks.is_empty());
+        assert!(
+            store
+                .journal_page("2027-01-01")
+                .expect("a lookup")
+                .is_none(),
+            "opening a date did not write a page"
+        );
+    }
+
+    #[test]
+    fn a_link_query_reports_utf16_offsets() {
+        assert_eq!(
+            link_query_json("see [[My", 8),
+            "{\"start\":4,\"end\":8,\"query\":\"My\"}"
+        );
+        // An emoji is two UTF-16 units, so the byte-offset helper and the returned start differ.
+        assert_eq!(
+            link_query_json("😀 [[My", 7),
+            "{\"start\":3,\"end\":7,\"query\":\"My\"}"
+        );
+        assert_eq!(link_query_json("plain", 5), "");
+    }
+
+    #[test]
+    fn bridge_move_commands_reorder_and_send_to_a_page() {        let mut store = session();
+        let day = store.ensure_journal_page("2026-11-02").expect("a day");
+        let a = store.insert_block(day, None, "a").expect("a") as i32;
+        let b = store.insert_block(day, None, "b").expect("b") as i32;
+
+        run_command(
+            &mut store,
+            Command::MoveUp {
+                block_id: b,
+                text: "b".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocks(&store, "2026-11-02"), ["b", "a"]);
+
+        run_command(&mut store, Command::MoveAfter { block_id: a, anchor_id: b }).unwrap();
+        assert_eq!(blocks(&store, "2026-11-02"), ["b", "a"]);
+        run_command(&mut store, Command::MoveBefore { block_id: a, anchor_id: b }).unwrap();
+        assert_eq!(blocks(&store, "2026-11-02"), ["a", "b"]);
+
+        let target = store.ensure_page("Target").expect("a page");
+        run_command(
+            &mut store,
+            Command::MoveToPage {
+                block_id: b,
+                name: "Target".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocks(&store, "2026-11-02"), ["a"]);
+        let moved = store.page_blocks(target).expect("the target");
+        assert_eq!(moved[0].content, "b");
+    }
+
+    #[test]
+    fn page_actions_rename_delete_and_refuse() {
+        let mut store = session();
+        store.ensure_page("Old").expect("a page");
+        let day = store.ensure_journal_page("2026-11-02").expect("a day");
+        store.insert_block(day, None, "[[Old]]").expect("a link");
+
+        let (note, next) = apply_page_action(
+            &mut store,
+            &Mode::Page("Old".to_string()),
+            PageActionKind::Rename("New".to_string()),
+        );
+        assert!(note.contains("Renamed"), "{note}");
+        assert_eq!(next, Some(Mode::Page("New".to_string())));
+        assert!(store.page_by_name("new").expect("a lookup").is_some());
+
+        let (note, next) = apply_page_action(
+            &mut store,
+            &Mode::Page("New".to_string()),
+            PageActionKind::Delete,
+        );
+        assert!(note.contains("linked references"), "{note}");
+        assert_eq!(next, None, "a refusal keeps the view");
+
+        let solo = store.ensure_page("Solo").expect("a page");
+        assert!(solo > 0);
+        let (note, next) = apply_page_action(
+            &mut store,
+            &Mode::Page("Solo".to_string()),
+            PageActionKind::Delete,
+        );
+        assert!(note.contains("Deleted"), "{note}");
+        assert_eq!(next, Some(Mode::Journal));
+
+        let (note, next) = apply_page_action(
+            &mut store,
+            &Mode::Page("Gone".to_string()),
+            PageActionKind::Delete,
+        );
+        assert!(note.contains("no longer"), "{note}");
+        assert_eq!(next, Some(Mode::Journal));
+
+        let journal = store.ensure_journal_page("2026-11-03").expect("a day");
+        let _ = journal;
+        let (note, next) = apply_page_action(
+            &mut store,
+            &Mode::Page("2026-11-03".to_string()),
+            PageActionKind::Rename("Other".to_string()),
+        );
+        assert!(note.contains("journal day"), "{note}");
+        assert_eq!(next, None);
     }
 
     fn blocks(store: &Store, date: &str) -> Vec<String> {

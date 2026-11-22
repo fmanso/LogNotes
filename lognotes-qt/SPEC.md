@@ -30,9 +30,9 @@ plain text — styling is for reading, never for editing.
   own beyond the diagram cache, and any second writer thread.
 - **Depended on by:** nothing. The crate's one binary is the application.
 
-The C++ in this crate is two hand-written shims beside the generated glue: `markdown_shim.cpp` applies
-formats to a text document and `driver_shim.cpp` drives the window under the `driver` feature. Everything
-else is cxx-qt's.
+The C++ in this crate is one hand-written shim beside the generated glue: `driver_shim.cpp` drives the
+window under the `driver` feature. The markdown shim went with the old syntax highlighter; everything else is
+cxx-qt's.
 
 The store is opened *inside* the worker thread, from a path `main` publishes before the window loads, so
 the GUI thread never has an open handle to pass around — or to leak into a delegate.
@@ -270,9 +270,9 @@ with the command's effect and never types markdown into the block, and each comm
   go to `focus_row`; the caret is then put on the match by looking for the query in that row's text, since
   core returns where the block is, not where in the block the words are.
 - **One button style, one popup palette.** `QuietButton` is the window's only button: an outlined control in
-  the page's own colours. The Pages popup and the date picker are cream panels with a hairline border and a
-  tinted hover row, because the control style's default chrome is dark and the text drawn on it was
-  `#242424` on `#2a2a2a` — a page list you could not read.
+  the page's own colours. The date picker and the completion menus are cream panels with a hairline border
+  and a tinted hover row, because the control style's default chrome is dark and the text drawn on it was
+  `#242424` on `#2a2a2a` — a menu you could not read.
 - **Links carry the theme's accent, inline.** Qt draws an anchor in the palette's stock link blue, which
   belongs to neither theme — harsh on a dark page, foreign on a cream one. Every rendered anchor therefore
   carries `style="color:…"` from the same palette as the fences, and keeps its underline as the affordance.
@@ -281,8 +281,10 @@ with the command's effect and never types markdown into the block, and each comm
   fence whose language nobody knows renders as plain code.
 - **A backup is written as the store opens.** The worker copies the database with SQLite's own `VACUUM
   INTO` (a consistent copy of a live file, not a read of its pages) into `backups/` beside it, at most once a
-  day, keeping the newest seven. It happens before any typing, and a failed backup is not a reason to refuse
-  to open the notes.
+  day, keeping the newest seven. Manual copies keep their own seven, and pre-migration and pre-restore
+  safety copies keep three each, so one kind cannot evict another. The copy is written under a temporary
+  name and swapped in only when complete; a failed copy leaves the previous file in place. It happens
+  before any typing, and a failed backup is not a reason to refuse to open the notes.
 - **A past day nobody wrote in leaves no trace.** `shows_day` keeps the newest day — that is where the
   cursor goes — and every day before it only when it has blocks. The column is a record of what was
   written, not of the calendar, and it fills itself: while it is shorter than the window it pulls older
@@ -299,17 +301,79 @@ with the command's effect and never types markdown into the block, and each comm
   one is scaled down, and a very tall one is capped. A fence that does not parse keeps its code and adds
   one muted line, produced only after the typing pause so half-typed diagrams do not flicker.
 
+## Reaching a day
+
+The bar's **Date** control opens the calendar and opens the chosen day as a page, past or future. A day that
+was never written shows its heading and an empty block without creating a page row; the first keystroke
+creates the row and the block together. A written day shows its blocks and linked references, and never the
+agenda. The Journal button returns to the column with the same days loaded.
+
+## Writing links
+
+Typing `[[` opens a completion list beside the caret over the page names and written days in the snapshot,
+exact and prefix matches first, at most eight rows. Up/Down move the highlight, Enter or a click inserts
+`[[Name]]` and puts the caret after it, and Esc leaves the text exactly as typed. A non-empty query with no
+match still closes as `[[query]]`, so saving creates the page. The list takes no focus, so typing keeps
+working, and it does not open inside inline code or a fence.
+
+## Moving the caret
+
+With no selection, Up on a block's first line moves the caret to the end of the previous editable block,
+and Down on its last line moves it to the start of the next; within a multi-line block the keys stay in the
+text. Headings, agenda rows, references and result rows are skipped, and the first or last editable block
+leaves the key to the editor. Shift keeps its selection meaning, and an open slash or link menu owns Up and
+Down while it is up.
+
+## Folding
+
+A block with children shows a chevron; clicking it persists `collapsed` and omits the descendants from the
+snapshot, so reopening the page or restarting the app keeps them hidden. Folding is view state, like a star
+or a visit: it does not enter the undo history, and one undo never unfolds something the user folded. If the
+caret was inside the folded subtree, it moves to the folded block.
+
+## Moving blocks
+
+Alt+Up/Down swaps the caret's block with its previous or next sibling; Ctrl+Shift+Up/Down is the fallback
+where the desktop owns Alt. Hover a block to reveal its drag handle; dragging it above or below another
+block sends one move to the store. Ctrl+Shift+M opens the "Move to page" picker over the page names in the
+snapshot, including written journal days. A move carries the whole subtree and its page ownership, is one
+undo step, and is refused when the target is inside the block itself.
+
+## Page actions
+
+A named page's header has a "…" menu with **Rename** and **Delete**; a journal day shows neither. Rename
+opens a dialog prefilled with the name and, on success, leaves the page in view under the new name with a
+note naming how many blocks were rewritten and how many plain mentions were left. Delete says how many
+linked references the page still has and disables the button while that is nonzero; a successful delete
+returns to the journal with a note. Both refusals arrive in the note line, not the error pane, so the page
+stays open. Undoing a rename leaves the view on a name that no longer exists, so the worker falls back to
+the journal rather than showing an empty page that could recreate it.
+
 ## The settings page
 
 A word ("Settings") in the bar opens a page over the column, the way the results view does — a place you go
 and come back from, not a dialog. It shows the database path and the backups folder (both a path to read and
-a `file://` URL to hand to the system file manager), the backups there are with their sizes, "Back up now",
-and Import/Export.
+a `file://` URL to hand to the system file manager), the backups there are with their sizes and what each
+one is for, "Back up now", restore, and Import/Export. An **ABOUT** section at the bottom names the build
+(`LogNotes <version>` from `CARGO_PKG_VERSION`), the platform from `Qt.platform.os`, a one-line description
+and the MIT licence. The version is read from the build; QML never hardcodes a number.
+
+Each backup row has a **Restore** button. Restoring asks first, then saves the current database as
+`pre-restore-<timestamp>.db`, stages the chosen file under `<db>.restoring`, opens it once to prove it is a
+database (migrating an older copy there, not in place), and only then removes the live files and swaps the
+new one in. A file that is not a usable database is refused before anything live is touched; a failure
+while the store is open is reported in the note line and leaves the column open. A restore replaces the
+undo history, and the confirmation says the current database is saved first.
 
 Nothing on it goes through the row pipeline: these are not block edits, so they are a separate `Job` that
-answers with a note (`Copied to …`, `Exported 3 pages and 12 days to …`, `could not export: …`) and the
-refreshed backup list. An import is the exception — it changes the notes, so it also delivers a fresh
+answers with a note (`Copied to …`, `Restored …`, `Exported 3 pages and 12 days to …`, `could not export: …`)
+and the refreshed backup list. An import is the exception — it changes the notes, so it also delivers a fresh
 snapshot and the column shows the imported pages without a restart.
+
+Import asks how the folder should land: **Merge** replaces the pages and days the folder names and leaves the
+rest alone (re-importing the same folder is idempotent), or **Replace all** clears every block first and lets
+pages the folder does not name remain as empty addresses; Cancel writes nothing. Either mode is one
+transaction and one undo step, and the note reports the counts.
 
 A failed export/import must not blank the app: its error goes into the note line, not into `error`, which
 puts the error card over the column and says the notes could not be opened.
@@ -322,27 +386,60 @@ export is meant to be the safe copy, so it never overwrites notes without being 
 `⚙` is not used for the button: the gear resolves to the colour emoji font on this system and is drawn in
 its blue, so the button is a word, matching "Journal" beside it.
 
+## Single instance
+
+`start` takes an exclusive lock on `<database>.lock` before it dispatches the store open. The handle lives in
+the model for the life of the process, so the OS releases it on exit or crash; there is no stale file to
+remove. A second launch shows "LogNotes is already running" and opens no store, with `can_restore` false so
+it cannot swap files under the first; Retry takes the lock once the other window is gone. The lock helper is
+covered by a unit test; the two-window message is a manual check.
+
+## Diagnostics
+
+`lognotes.log` sits beside the database. Its first line names the build version, the operating system, and
+the data path; after that it records startup, the data-folder lock, store open and migration copies, daily
+and manual backups, restores, imports and exports, and a panic with its location and backtrace. It rotates
+at 1 MiB and keeps three files. Logging is best effort: a log that cannot be written never stops the notes
+from opening.
+
 ## Failure
 
 `start()` sets `error` and leaves `ready` false when the store refuses to open; QML then shows the error
-pane (message, path, Retry, Quit) and hides the column. `ready` is the only gate on rendering rows, so a
-broken database can never look like an empty journal.
+pane (message, path, Retry, **Restore a backup…** and Quit) and hides the column. `ready` is the only gate on
+rendering rows, so a broken database can never look like an empty journal.
+
+`can_restore` is true only while this instance holds the data-folder lock, so a second instance can never
+swap files under the first. Restoring from the error pane opens a file dialog in the backups folder; the
+unopenable database and its sidecars are kept beside the backups as `pre-restore-<timestamp>-unopenable` and
+the chosen copy becomes the live file. A failed restore leaves the error pane in place with the reason and
+the path of the copy that was kept.
+
+## Packaging
+
+The released Linux artifact is a tarball (binary, `.desktop`, icon, README, licence) and the Windows artifact
+is a portable zip carrying its Qt libraries; README has the install steps and the SmartScreen note. No
+AppImage, Flatpak, or Windows installer is built: a one-click installer waits for a code-signing
+certificate, because an unsigned one adds no trust over the zip.
 
 ## Known limitations
 
 - Markdown styling cannot invent glyphs: while a block is being edited, a list's `-` and a quote's `>` stay
   visible, dimmed, instead of becoming a drawn bullet or a bar — they do disappear in the rendered form.
-  Folding is likewise not implemented: every block renders expanded, and link autocompletion when typing
-  `[[` does not exist yet. A diagram cannot be enlarged, and it is drawn in blocks only — a summary row
-  shows the fence as code, not as a picture. The slash menu lists the commands the app has; code fences and
-  markdown marks are typed, not inserted.
-- Blocks cannot be reordered (only indented, outdented, created, edited, deleted).
+  A diagram cannot be enlarged, and it is drawn in blocks only — a summary row shows the fence as code, not
+  as a picture. The slash menu lists the commands the app has; code fences and markdown marks are typed, not
+  inserted.
+- Backspace at the start of a non-empty block does not merge it into the previous one: only an empty block
+  is deleted. The composite merge is a recorded omission, not an oversight.
 - The focus restoration is index-based; a keypress that changes the row count between snapshot and
   rebuild can land the caret one row off.
 - `cursorPosition` from QML is a UTF-16 offset while the core splits at UTF-8 byte boundaries; they agree
   for BMP text and diverge for characters outside it (emoji), where a split lands on the nearest boundary.
 
 ## Live testing
+
+The same scenario runs in `.github/workflows/livetest.yml` on a schedule under Xvfb, with the software Qt
+backend, and uploads its screenshots. It is non-blocking until it has a stable streak; the local `make
+livetest` remains the authoritative run.
 
 The window can be driven without a person at the keyboard, which is how its input handling gets checked:
 
@@ -374,7 +471,8 @@ the theme to dark and back, clicking a link in a block at rest and typing on the
 to open the command menu and Enter to run what it highlights, narrowing it with another letter and reaching
 the next command with Down, Esc leaving the token as typed, `/scheduled` through the calendar and one
 Ctrl+Z taking its date and its text back together, and clicking the date link it wrote to open that day as a
-page — then finally a close with a pending debounce. Each step is checked against the
+page. Settings then backs up now, exports, imports a folder in Merge and Replace-all modes, restores a second
+database and checks the pre-restore copy, and closes with a pending debounce. Each step is checked against the
 stored rows and depths, and every step saves a PNG so a human (or a reviewing agent) can see the rendered
 window rather than trust a passing assertion.
 

@@ -16,6 +16,27 @@ pub enum Error {
     #[error("a page needs a name")]
     BadPageName,
 
+    #[error("that page name cannot be used: {0}")]
+    BadRenameName(String),
+
+    #[error("a page named {0} already exists")]
+    PageExists(String),
+
+    #[error("no page named {0}")]
+    PageNotFound(String),
+
+    #[error("a journal day cannot be renamed")]
+    CannotRenameJournal,
+
+    #[error("a journal day cannot be deleted")]
+    CannotDeleteJournal,
+
+    #[error("the page still has {0} linked references")]
+    PageHasLinks(usize),
+
+    #[error("a block cannot be moved inside itself")]
+    MoveIntoSelf,
+
     #[error("offset {0} is not on a character boundary")]
     BadOffset(usize),
 

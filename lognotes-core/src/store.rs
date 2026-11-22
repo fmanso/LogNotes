@@ -4,15 +4,18 @@
 //! Nothing else may write, so no command can forget to be undoable.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{Days, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Error, Result};
+use crate::export::{ImportMode, Moved, ParsedPage};
+use crate::markdown;
+use crate::markdown::LinkKind;
 use crate::model::{
     AgendaRow, BlockHit, BlockRecord, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind,
-    ReferenceRow, SearchResults,
+    ReferenceRow, Renamed, SearchResults,
 };
 use crate::order::key_between;
 use crate::text::{extract_links, mentions_whole_words};
@@ -108,8 +111,13 @@ enum Action {
     },
     SetPosition {
         block_id: i64,
+        page_id: i64,
         parent_id: Option<i64>,
         order_key: String,
+    },
+    SetPage {
+        block_id: i64,
+        page_id: i64,
     },
     SetMarker {
         block_id: i64,
@@ -119,7 +127,38 @@ enum Action {
         block_id: i64,
         date: Option<String>,
     },
+    /// Rename a page and rewrite the block texts that name it, in that order. The inverse carries the
+    /// old texts so the same action can undo and redo without a second path.
+    RenamePage {
+        page_id: i64,
+        from_name: String,
+        from_key: String,
+        to_name: String,
+        to_key: String,
+        changes: Vec<(i64, String)>,
+    },
+    DeletePage {
+        page: PageRecord,
+        blocks: Vec<BlockRecord>,
+    },
+    RestorePage {
+        page: PageRecord,
+        blocks: Vec<BlockRecord>,
+    },
     Composite(Vec<Action>),
+}
+
+#[derive(Debug, Clone)]
+struct PageRecord {
+    id: i64,
+    name: String,
+    name_key: String,
+    kind: PageKind,
+    journal_date: Option<String>,
+    favourite: bool,
+    visit_order: Option<i64>,
+    created_at: String,
+    updated_at: String,
 }
 
 type RawBlock = (
@@ -136,27 +175,51 @@ pub struct Store {
     conn: Connection,
     undo: Vec<Action>,
     redo: Vec<Action>,
+    /// The consistent copy written before an older schema was upgraded, if one was needed.
+    migration_copy: Option<PathBuf>,
 }
 
 impl Store {
     /// Open (or create) the database at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Store> {
-        Store::from_connection(Connection::open(path)?)
+        Store::from_connection(Connection::open(path)?, None)
+    }
+
+    /// Open (or create) the database, copying an older one into `backup_dir` before upgrading it.
+    ///
+    /// The copy is written with `VACUUM INTO` from the open connection, so it includes anything still
+    /// in the write-ahead log. If it cannot be written, the upgrade does not run: opening without a
+    /// copy is the one risk this path exists to avoid.
+    pub fn open_with_migration_backup(
+        path: impl AsRef<Path>,
+        backup_dir: impl AsRef<Path>,
+    ) -> Result<Store> {
+        Store::from_connection(Connection::open(path)?, Some(backup_dir.as_ref()))
     }
 
     /// An ephemeral store, used by tests.
     pub fn open_in_memory() -> Result<Store> {
-        Store::from_connection(Connection::open_in_memory()?)
+        Store::from_connection(Connection::open_in_memory()?, None)
     }
 
-    fn from_connection(conn: Connection) -> Result<Store> {
+    fn from_connection(conn: Connection, migration_backup: Option<&Path>) -> Result<Store> {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+        let migration_copy = match migration_backup {
+            Some(backup_dir) => copy_before_migration(&conn, backup_dir)?,
+            None => None,
+        };
         migrate(&conn)?;
         Ok(Store {
             conn,
             undo: Vec::new(),
             redo: Vec::new(),
+            migration_copy,
         })
+    }
+
+    /// The copy written before this store upgraded an older database, when one was made.
+    pub fn migration_copy(&self) -> Option<&Path> {
+        self.migration_copy.as_deref()
     }
 
     // ----- pages -------------------------------------------------------------------------------
@@ -200,6 +263,93 @@ impl Store {
             .query_map([], read_page)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(pages)
+    }
+
+    /// Rename a named page and rewrite the explicit references that resolve to it. One undo step.
+    pub fn rename_page(&mut self, page_id: i64, new_name: &str) -> Result<Renamed> {
+        let page = self.page(page_id)?;
+        if page.kind == PageKind::Journal {
+            return Err(Error::CannotRenameJournal);
+        }
+
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(Error::BadRenameName("a page needs a name".to_string()));
+        }
+        if name.contains(['[', ']', '\n', '\r']) {
+            return Err(Error::BadRenameName(
+                "a page name cannot contain brackets or a line break".to_string(),
+            ));
+        }
+        if is_date_name(name) {
+            return Err(Error::BadRenameName(
+                "a date is a journal day, not a page name".to_string(),
+            ));
+        }
+
+        let key = page_key(name);
+        if let Some(other) = self.page_by_name(&key)? {
+            if other.id != page_id {
+                return Err(Error::PageExists(name.to_string()));
+            }
+        }
+
+        let mentions = self
+            .references(page_id)?
+            .into_iter()
+            .filter(|row| row.kind == ReferenceKind::Mention)
+            .count();
+
+        let mut changes = Vec::new();
+        {
+            let mut stmt = self.conn.prepare("SELECT id, content FROM block")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (block_id, content) = row?;
+                if let Some(rewritten) = rewrite_page_links(&content, &page.name_key, name) {
+                    changes.push((block_id, rewritten));
+                }
+            }
+        }
+
+        let changed = changes.len();
+        self.exec(Action::RenamePage {
+            page_id,
+            from_name: page.name,
+            from_key: page.name_key,
+            to_name: name.to_string(),
+            to_key: key,
+            changes,
+        })?;
+        Ok(Renamed {
+            blocks: changed,
+            mentions,
+        })
+    }
+
+    /// Delete a named page and its blocks. Refused while any block explicitly links to it.
+    pub fn delete_page(&mut self, page_id: i64) -> Result<()> {
+        let page = self.page(page_id)?;
+        if page.kind == PageKind::Journal {
+            return Err(Error::CannotDeleteJournal);
+        }
+        let linked: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM block_link WHERE page_id = ?1",
+            [page_id],
+            |row| row.get(0),
+        )?;
+        if linked > 0 {
+            return Err(Error::PageHasLinks(linked as usize));
+        }
+
+        let record = page_record(&self.conn, page_id)?;
+        let blocks = page_block_records(&self.conn, page_id)?;
+        self.exec(Action::DeletePage {
+            page: record,
+            blocks,
+        })
     }
 
     /// Look up a journal day without creating it. Reading is not writing.
@@ -338,6 +488,7 @@ impl Store {
             .optional()?;
         self.exec(Action::SetPosition {
             block_id,
+            page_id: record.page_id,
             parent_id: Some(new_parent),
             order_key: key_between(last_child.as_deref(), None)?,
         })
@@ -353,9 +504,176 @@ impl Store {
         let next = self.next_sibling_key(parent.page_id, parent.parent_id, &parent.order_key)?;
         self.exec(Action::SetPosition {
             block_id,
+            page_id: parent.page_id,
             parent_id: parent.parent_id,
             order_key: key_between(Some(&parent.order_key), next.as_deref())?,
         })
+    }
+
+    /// Move a block (with its subtree) to a position on a page.
+    ///
+    /// `after` is the sibling to sit behind; its parent is the new parent. `after = None` appends at the
+    /// top level of the target page. The whole subtree moves page ownership with it.
+    pub fn move_block(&mut self, block_id: i64, page_id: i64, after: Option<i64>) -> Result<()> {
+        let record = block_record(&self.conn, block_id)?;
+        self.page(page_id)?;
+
+        let (parent_id, order_key) = match after {
+            Some(anchor_id) => {
+                let anchor = block_record(&self.conn, anchor_id)?;
+                if anchor.page_id != page_id {
+                    return Err(Error::NotFound(anchor_id));
+                }
+                let next = self.next_sibling_key(page_id, anchor.parent_id, &anchor.order_key)?;
+                (
+                    anchor.parent_id,
+                    key_between(Some(&anchor.order_key), next.as_deref())?,
+                )
+            }
+            None => {
+                let last = last_top_key(&self.conn, page_id)?;
+                (None, key_between(last.as_deref(), None)?)
+            }
+        };
+
+        if let Some(parent_id) = parent_id {
+            if parent_id == block_id || is_descendant(&self.conn, parent_id, block_id)? {
+                return Err(Error::MoveIntoSelf);
+            }
+        }
+
+        let mut actions = vec![Action::SetPosition {
+            block_id,
+            page_id,
+            parent_id,
+            order_key,
+        }];
+        if page_id != record.page_id {
+            for descendant in subtree(&self.conn, block_id)?.into_iter().skip(1) {
+                if descendant.page_id != page_id {
+                    actions.push(Action::SetPage {
+                        block_id: descendant.id,
+                        page_id,
+                    });
+                }
+            }
+        }
+        self.exec(Action::Composite(actions))
+    }
+
+    /// Swap a block with its previous sibling. The first sibling is a no-op.
+    pub fn move_up(&mut self, block_id: i64) -> Result<()> {
+        let record = block_record(&self.conn, block_id)?;
+        let previous: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM block
+                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
+                 ORDER BY order_key DESC LIMIT 1",
+                params![record.page_id, record.parent_id, record.order_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(previous_id) = previous else {
+            return Ok(());
+        };
+        let previous = block_record(&self.conn, previous_id)?;
+        let before: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT order_key FROM block
+                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
+                 ORDER BY order_key DESC LIMIT 1",
+                params![record.page_id, record.parent_id, previous.order_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        self.exec(Action::SetPosition {
+            block_id,
+            page_id: record.page_id,
+            parent_id: record.parent_id,
+            order_key: key_between(before.as_deref(), Some(&previous.order_key))?,
+        })
+    }
+
+    /// Swap a block with its next sibling. The last sibling is a no-op.
+    pub fn move_down(&mut self, block_id: i64) -> Result<()> {
+        let record = block_record(&self.conn, block_id)?;
+        let next: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM block
+                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key > ?3
+                 ORDER BY order_key LIMIT 1",
+                params![record.page_id, record.parent_id, record.order_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(next_id) = next else {
+            return Ok(());
+        };
+        let next = block_record(&self.conn, next_id)?;
+        let after: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT order_key FROM block
+                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key > ?3
+                 ORDER BY order_key LIMIT 1",
+                params![record.page_id, record.parent_id, next.order_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        self.exec(Action::SetPosition {
+            block_id,
+            page_id: record.page_id,
+            parent_id: record.parent_id,
+            order_key: key_between(Some(&next.order_key), after.as_deref())?,
+        })
+    }
+
+    /// Move a block after another block, wherever that block lives.
+    pub fn move_block_after(&mut self, block_id: i64, anchor_id: i64) -> Result<()> {
+        let anchor = block_record(&self.conn, anchor_id)?;
+        self.move_block(block_id, anchor.page_id, Some(anchor_id))
+    }
+
+    /// Move a block before another block, wherever that block lives.
+    pub fn move_block_before(&mut self, block_id: i64, anchor_id: i64) -> Result<()> {
+        let anchor = block_record(&self.conn, anchor_id)?;
+        let previous: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM block
+                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
+                 ORDER BY order_key DESC LIMIT 1",
+                params![anchor.page_id, anchor.parent_id, anchor.order_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match previous {
+            Some(previous) => self.move_block(block_id, anchor.page_id, Some(previous)),
+            None => {
+                if let Some(parent_id) = anchor.parent_id {
+                    if parent_id == block_id || is_descendant(&self.conn, parent_id, block_id)? {
+                        return Err(Error::MoveIntoSelf);
+                    }
+                }
+                self.exec(Action::SetPosition {
+                    block_id,
+                    page_id: anchor.page_id,
+                    parent_id: anchor.parent_id,
+                    order_key: key_between(None, Some(&anchor.order_key))?,
+                })
+            }
+        }
+    }
+
+    /// Move a block (with its subtree) to the end of a named page or journal day.
+    pub fn move_block_to_page(&mut self, block_id: i64, page_name: &str) -> Result<()> {
+        let page = self
+            .page_by_name(&page_key(page_name))?
+            .ok_or_else(|| Error::PageNotFound(page_name.to_string()))?;
+        self.move_block(block_id, page.id, None)
     }
 
     /// Walk the marker cycle: none → TODO → DOING → DONE → none.
@@ -476,6 +794,7 @@ impl Store {
                         marker: row.get::<_, Option<String>>(4)?.as_deref().and_then(Marker::parse),
                         scheduled_date: scheduled.clone(),
                         collapsed: row.get(6)?,
+                        child_count: 0,
                     },
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
@@ -662,15 +981,44 @@ impl Store {
     ///
     /// `VACUUM INTO` is the one way to copy a live SQLite database and get a file that is not a torn mix of
     /// pages: it reads under the connection's own snapshot and writes a compacted copy that opens on its
-    /// own. The file must not exist — this removes it first, so re-running a backup for the same day just
-    /// rewrites it.
+    /// own. The copy is prepared under a temporary name and only swapped in once it is complete, so a
+    /// failed backup leaves the previous file exactly where it was.
     pub fn backup_into(&self, path: &Path) -> Result<()> {
-        if path.exists() {
-            std::fs::remove_file(path).map_err(|error| Error::Backup(error.to_string()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::Backup(format!("{} has no file name", path.display())))?;
+        let temp = path.with_file_name(format!("{name}.tmp"));
+        let old = path.with_file_name(format!("{name}.old"));
+        let failed = |error: std::io::Error| Error::Backup(error.to_string());
+
+        // A leftover temporary or old file is not data; clear it before writing. If one is a directory,
+        // this fails and the real target is still untouched.
+        if temp.exists() {
+            std::fs::remove_file(&temp).map_err(failed)?;
         }
+        if old.exists() {
+            std::fs::remove_file(&old).map_err(failed)?;
+        }
+
         self.conn
-            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+            .execute("VACUUM INTO ?1", params![temp.to_string_lossy()])
             .map_err(Error::from)?;
+
+        let had_target = path.exists();
+        if had_target {
+            std::fs::rename(path, &old).map_err(failed)?;
+        }
+        if let Err(error) = std::fs::rename(&temp, path) {
+            if had_target {
+                let _ = std::fs::rename(&old, path);
+            }
+            let _ = std::fs::remove_file(&temp);
+            return Err(failed(error));
+        }
+        if had_target {
+            let _ = std::fs::remove_file(&old);
+        }
         Ok(())
     }
 
@@ -694,6 +1042,88 @@ impl Store {
             )
             .map_err(Error::from)?;
         Ok(())
+    }
+
+    /// Write parsed pages into the store as one transaction and one undo step.
+    ///
+    /// `Merge` replaces the blocks of every page or day the folder names; `ReplaceAll` clears every block
+    /// first. The page rows are addresses and stay (or are created) outside the history.
+    pub(crate) fn import_pages(&mut self, pages: &[ParsedPage], mode: ImportMode) -> Result<Moved> {
+        let mut moved = Moved::default();
+        let tx = self.conn.transaction()?;
+        let mut inverses: Vec<Action> = Vec::new();
+
+        if mode == ImportMode::ReplaceAll {
+            for block_id in top_level_blocks(&tx, None)? {
+                inverses.push(apply_action(&tx, &Action::Delete { block_id })?);
+            }
+        }
+
+        for page in pages {
+            let page_id = match page.journal_date.as_deref() {
+                Some(date) => ensure_journal_page_on(&tx, date)?,
+                None => ensure_page_on(&tx, &page.name)?,
+            };
+
+            if mode == ImportMode::Merge {
+                for block_id in top_level_blocks(&tx, Some(page_id))? {
+                    inverses.push(apply_action(&tx, &Action::Delete { block_id })?);
+                }
+            }
+
+            // The last block at each depth, so a bullet lands as the child of the nearest shallower one.
+            let mut last_at_depth: HashMap<usize, i64> = HashMap::new();
+            for bullet in &page.bullets {
+                let depth = bullet.depth;
+                let (parent_id, last_key) = if depth == 0 {
+                    (None, last_top_key(&tx, page_id)?)
+                } else {
+                    match (0..depth).rev().find(|level| last_at_depth.contains_key(level)) {
+                        Some(level) => {
+                            let parent = last_at_depth[&level];
+                            (Some(parent), last_child_key(&tx, parent)?)
+                        }
+                        None => (None, last_top_key(&tx, page_id)?),
+                    }
+                };
+
+                let id = next_block_id_on(&tx)?;
+                let now = now();
+                let record = BlockRecord {
+                    id,
+                    page_id,
+                    parent_id,
+                    order_key: key_between(last_key.as_deref(), None)?,
+                    content: bullet.content.clone(),
+                    marker: bullet.marker,
+                    scheduled_date: bullet.scheduled.clone(),
+                    collapsed: false,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                inverses.push(apply_action(&tx, &Action::Insert { record })?);
+
+                last_at_depth.insert(depth, id);
+                for level in last_at_depth.keys().copied().collect::<Vec<_>>() {
+                    if level > depth {
+                        last_at_depth.remove(&level);
+                    }
+                }
+                moved.blocks += 1;
+            }
+
+            if page.journal_date.is_some() {
+                moved.days += 1;
+            } else {
+                moved.pages += 1;
+            }
+        }
+
+        tx.commit()?;
+        inverses.reverse();
+        self.undo.push(Action::Composite(inverses));
+        self.redo.clear();
+        Ok(moved)
     }
 
     /// The page a block belongs to — what the view needs to show a block a search found.
@@ -776,6 +1206,19 @@ impl Store {
     /// Delete a block and everything under it. One undo step restores the whole subtree.
     pub fn delete_block(&mut self, block_id: i64) -> Result<()> {
         self.exec(Action::Delete { block_id })
+    }
+
+    /// Persist whether a block's children are folded. This is view state, like a star or a visit: it
+    /// stays outside the undo history, so undo never unfolds something the user folded.
+    pub fn set_collapsed(&mut self, block_id: i64, collapsed: bool) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE block SET collapsed = ?2, updated_at = ?3 WHERE id = ?1",
+            params![block_id, collapsed, now()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(block_id));
+        }
+        Ok(())
     }
 
     // ----- history -----------------------------------------------------------------------------
@@ -882,11 +1325,7 @@ impl Store {
     }
 
     fn next_block_id(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT IFNULL(MAX(id), 0) + 1 FROM block", [], |row| {
-                row.get(0)
-            })?)
+        next_block_id_on(&self.conn)
     }
 
     fn next_sibling_key(
@@ -908,12 +1347,158 @@ impl Store {
     }
 }
 
+fn next_block_id_on(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT IFNULL(MAX(id), 0) + 1 FROM block", [], |row| {
+        row.get(0)
+    })?)
+}
+
+fn last_top_key(conn: &Connection, page_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT order_key FROM block
+             WHERE page_id = ?1 AND parent_id IS NULL
+             ORDER BY order_key DESC LIMIT 1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn last_child_key(conn: &Connection, parent_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT order_key FROM block WHERE parent_id = ?1 ORDER BY order_key DESC LIMIT 1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn top_level_blocks(conn: &Connection, page_id: Option<i64>) -> Result<Vec<i64>> {
+    let mut out = Vec::new();
+    match page_id {
+        Some(page_id) => {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM block WHERE page_id = ?1 AND parent_id IS NULL ORDER BY order_key",
+            )?;
+            let rows = stmt.query_map([page_id], |row| row.get(0))?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM block WHERE parent_id IS NULL ORDER BY page_id, order_key",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The identity a page name resolves to: trimmed, lowercased.
+fn page_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// Whether a name is a strict `YYYY-MM-DD` and therefore a journal day, not a page.
+pub fn is_date_name(name: &str) -> bool {
+    ensure_date(name).is_ok()
+}
+
+/// Whether a page name can be written as a `#tag`: one token, no `#` and no brackets.
+fn tag_representable(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '#' | '[' | ']'))
+}
+
+/// Rewrite the links and tags that resolve to `old_key`, or return `None` when the block names it in no
+/// explicit way. Ranges come from the one markdown scanner, so code is already excluded.
+fn rewrite_page_links(content: &str, old_key: &str, new_name: &str) -> Option<String> {
+    let scan = markdown::scan(content);
+    let matches: Vec<&markdown::LinkRef> = scan
+        .links
+        .iter()
+        .filter(|link| {
+            matches!(link.kind, LinkKind::Page | LinkKind::Tag)
+                && page_key(&link.target) == old_key
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+
+    let mut rewritten = content.to_string();
+    for link in matches.into_iter().rev() {
+        let replacement = match link.kind {
+            LinkKind::Page => format!("[[{new_name}]]"),
+            LinkKind::Tag if tag_representable(new_name) => format!("#{new_name}"),
+            LinkKind::Tag => format!("[[{new_name}]]"),
+            LinkKind::Url => continue,
+        };
+        rewritten.replace_range(link.start..link.end, &replacement);
+    }
+    Some(rewritten)
+}
+
+fn page_record(conn: &Connection, page_id: i64) -> Result<PageRecord> {
+    conn.query_row(
+        "SELECT id, name, name_key, kind, journal_date, favourite, visit_order, created_at, updated_at
+         FROM page WHERE id = ?1",
+        [page_id],
+        |row| {
+            Ok(PageRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                name_key: row.get(2)?,
+                kind: PageKind::parse(&row.get::<_, String>(3)?),
+                journal_date: row.get(4)?,
+                favourite: row.get(5)?,
+                visit_order: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or(Error::NotFound(page_id))
+}
+
+fn page_block_records(conn: &Connection, page_id: i64) -> Result<Vec<BlockRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, page_id, parent_id, order_key, content, marker, scheduled_date, collapsed,
+                created_at, updated_at
+         FROM block WHERE page_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([page_id], |row| {
+        Ok(BlockRecord {
+            id: row.get(0)?,
+            page_id: row.get(1)?,
+            parent_id: row.get(2)?,
+            order_key: row.get(3)?,
+            content: row.get(4)?,
+            marker: row.get::<_, Option<String>>(5)?.as_deref().and_then(Marker::parse),
+            scheduled_date: row.get(6)?,
+            collapsed: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn ensure_page_on(conn: &Connection, name: &str) -> Result<i64> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(Error::BadPageName);
     }
-    let key = trimmed.to_lowercase();
+    let key = page_key(trimmed);
 
     // An existing row wins, whatever its kind: a page that was already named like a date keeps its
     // blocks, and no link is silently re-pointed at a different page.
@@ -997,11 +1582,31 @@ fn read_block_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Bl
             .and_then(Marker::parse),
         scheduled_date: row.get(offset + 5)?,
         collapsed: row.get(offset + 6)?,
+        child_count: 0,
     })
 }
 
-fn migrate(conn: &Connection) -> Result<()> {
+/// Copy an existing graph before a schema step touches it. A fresh file has nothing to copy.
+fn copy_before_migration(conn: &Connection, backup_dir: &Path) -> Result<Option<PathBuf>> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 1 || version >= SCHEMA_VERSION {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(backup_dir).map_err(|error| Error::Backup(error.to_string()))?;
+    let stamp = Utc::now().format("%Y-%m-%dT%H%M%S").to_string();
+    let name = format!(
+        "pre-migration-v{version}-to-v{SCHEMA_VERSION}-{stamp}-{}.db",
+        std::process::id()
+    );
+    let path = backup_dir.join(name);
+    conn.execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+        .map_err(|error| Error::Backup(error.to_string()))?;
+    Ok(Some(path))
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let mut version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > SCHEMA_VERSION {
         // A newer build wrote this file. Refuse rather than open it and damage it.
         return Err(Error::SchemaTooNew {
@@ -1009,16 +1614,19 @@ fn migrate(conn: &Connection) -> Result<()> {
             supported: SCHEMA_VERSION,
         });
     }
-    if version < 1 {
-        conn.execute_batch(SCHEMA)?;
+
+    // Each step and the version it claims commit together. A failure leaves the file at the last
+    // version that fully applied, so a retry never meets a half-created schema and an ALTER it has
+    // already run.
+    for (target, sql) in [(1, SCHEMA), (2, SCHEMA_V2), (3, SCHEMA_V3)] {
+        if version < target {
+            let step = conn.unchecked_transaction()?;
+            step.execute_batch(sql)?;
+            step.pragma_update(None, "user_version", target)?;
+            step.commit()?;
+            version = target;
+        }
     }
-    if version < 2 {
-        conn.execute_batch(SCHEMA_V2)?;
-    }
-    if version < 3 {
-        conn.execute_batch(SCHEMA_V3)?;
-    }
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -1067,25 +1675,45 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
         }
         Action::SetPosition {
             block_id,
+            page_id,
             parent_id,
             order_key,
         } => {
-            let (old_parent, old_key): (Option<i64>, String) = conn
+            let (old_page, old_parent, old_key): (i64, Option<i64>, String) = conn
                 .query_row(
-                    "SELECT parent_id, order_key FROM block WHERE id = ?1",
+                    "SELECT page_id, parent_id, order_key FROM block WHERE id = ?1",
                     [block_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?
                 .ok_or(Error::NotFound(*block_id))?;
             conn.execute(
-                "UPDATE block SET parent_id = ?2, order_key = ?3, updated_at = ?4 WHERE id = ?1",
-                params![block_id, parent_id, order_key, now()],
+                "UPDATE block
+                 SET page_id = ?2, parent_id = ?3, order_key = ?4, updated_at = ?5
+                 WHERE id = ?1",
+                params![block_id, page_id, parent_id, order_key, now()],
             )?;
             Ok(Action::SetPosition {
                 block_id: *block_id,
+                page_id: old_page,
                 parent_id: old_parent,
                 order_key: old_key,
+            })
+        }
+        Action::SetPage { block_id, page_id } => {
+            let old: i64 = conn
+                .query_row("SELECT page_id FROM block WHERE id = ?1", [block_id], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .ok_or(Error::NotFound(*block_id))?;
+            conn.execute(
+                "UPDATE block SET page_id = ?2, updated_at = ?3 WHERE id = ?1",
+                params![block_id, page_id, now()],
+            )?;
+            Ok(Action::SetPage {
+                block_id: *block_id,
+                page_id: old,
             })
         }
         Action::SetMarker { block_id, marker } => {
@@ -1120,6 +1748,89 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
             Ok(Action::SetScheduled {
                 block_id: *block_id,
                 date: old,
+            })
+        }
+        Action::RenamePage {
+            page_id,
+            from_name,
+            from_key,
+            to_name,
+            to_key,
+            changes,
+        } => {
+            let mut old_contents = Vec::with_capacity(changes.len());
+            for (block_id, _) in changes {
+                let old: String = conn
+                    .query_row("SELECT content FROM block WHERE id = ?1", [block_id], |row| {
+                        row.get(0)
+                    })
+                    .optional()?
+                    .ok_or(Error::NotFound(*block_id))?;
+                old_contents.push((*block_id, old));
+            }
+
+            // The page row changes first so the reindex below finds the renamed page instead of
+            // creating a second one for the new name.
+            let changed = conn.execute(
+                "UPDATE page SET name = ?2, name_key = ?3, updated_at = ?4 WHERE id = ?1",
+                params![page_id, to_name, to_key, now()],
+            )?;
+            if changed == 0 {
+                return Err(Error::NotFound(*page_id));
+            }
+            for (block_id, content) in changes {
+                conn.execute(
+                    "UPDATE block SET content = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![block_id, content, now()],
+                )?;
+                reindex(conn, *block_id)?;
+            }
+
+            Ok(Action::RenamePage {
+                page_id: *page_id,
+                from_name: to_name.clone(),
+                from_key: to_key.clone(),
+                to_name: from_name.clone(),
+                to_key: from_key.clone(),
+                changes: old_contents,
+            })
+        }
+        Action::DeletePage { page, blocks } => {
+            conn.execute("DELETE FROM page WHERE id = ?1", [page.id])?;
+            Ok(Action::RestorePage {
+                page: page.clone(),
+                blocks: blocks.clone(),
+            })
+        }
+        Action::RestorePage { page, blocks } => {
+            conn.execute(
+                "INSERT INTO page
+                   (id, name, name_key, kind, journal_date, favourite, visit_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    page.id,
+                    page.name,
+                    page.name_key,
+                    match page.kind {
+                        PageKind::Journal => "journal",
+                        PageKind::Page => "page",
+                    },
+                    page.journal_date,
+                    page.favourite,
+                    page.visit_order,
+                    page.created_at,
+                    page.updated_at
+                ],
+            )?;
+            let mut ordered = blocks.clone();
+            ordered.sort_by_key(|block| block.id);
+            for record in &ordered {
+                insert_row(conn, record)?;
+                reindex(conn, record.id)?;
+            }
+            Ok(Action::DeletePage {
+                page: page.clone(),
+                blocks: blocks.clone(),
             })
         }
         Action::Composite(actions) => {
@@ -1180,9 +1891,24 @@ fn block_record(conn: &Connection, id: i64) -> Result<BlockRecord> {
     .ok_or(Error::NotFound(id))
 }
 
+fn is_descendant(conn: &Connection, candidate: i64, ancestor: i64) -> Result<bool> {
+    let mut current = Some(candidate);
+    while let Some(id) = current {
+        if id == ancestor {
+            return Ok(true);
+        }
+        current = conn
+            .query_row("SELECT parent_id FROM block WHERE id = ?1", [id], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .optional()?
+            .flatten();
+    }
+    Ok(false)
+}
+
 /// A block and its descendants, parents before children so they can be re-inserted in order.
-fn subtree(conn: &Connection, root: i64) -> Result<Vec<BlockRecord>> {
-    let mut out = Vec::new();
+fn subtree(conn: &Connection, root: i64) -> Result<Vec<BlockRecord>> {    let mut out = Vec::new();
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         out.push(block_record(conn, id)?);
@@ -1208,6 +1934,7 @@ fn push_rows(
     };
     for index in indices {
         let row = &raw[*index];
+        let child_count = by_parent.get(&Some(row.0)).map_or(0, Vec::len);
         out.push(BlockRow {
             id: row.0,
             parent_id: row.1,
@@ -1217,8 +1944,11 @@ fn push_rows(
             marker: row.4.as_deref().and_then(Marker::parse),
             scheduled_date: row.5.clone(),
             collapsed: row.6,
+            child_count,
         });
-        push_rows(raw, by_parent, Some(row.0), depth + 1, out);
+        if !row.6 {
+            push_rows(raw, by_parent, Some(row.0), depth + 1, out);
+        }
     }
 }
 
@@ -1277,4 +2007,42 @@ fn ensure_date(date: &str) -> Result<NaiveDate> {
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{Bullet, ParsedPage};
+
+    #[test]
+    fn an_import_that_fails_while_writing_leaves_the_graph_unchanged() {
+        let mut store = Store::open_in_memory().expect("a store");
+        let page = store.ensure_page("Kept").expect("a page");
+        store.insert_block(page, None, "keep me").expect("a block");
+
+        let bad = ParsedPage {
+            name: String::new(),
+            journal_date: None,
+            bullets: vec![Bullet {
+                depth: 0,
+                marker: None,
+                scheduled: None,
+                content: "should not land".to_string(),
+            }],
+        };
+
+        assert!(matches!(
+            store.import_pages(&[bad], ImportMode::Merge),
+            Err(Error::BadPageName)
+        ));
+
+        let blocks = store.page_blocks(page).expect("blocks");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "keep me");
+        let total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM block", [], |row| row.get(0))
+            .expect("a count");
+        assert_eq!(total, 1, "the failed import wrote nothing");
+    }
 }

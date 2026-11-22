@@ -79,8 +79,8 @@ CREATE VIRTUAL TABLE block_fts USING fts5 (content, content = 'block', content_r
 **v3** adds `page.favourite`, `page.visit_order` and a `setting` table. A page can be starred for the
 sidebar; it remembers the order it was opened in as a *counter*, not a clock — two pages opened in the
 same millisecond still have a definite order, and a clock that jumps backwards cannot reshuffle the
-list; and the app keeps its own settings (the theme) in the same file as the notes, so "the database is
-the only persistent state" stays true. Starring and visiting stay outside the undo history: a star is
+list; and the app keeps its own settings (the theme) in the same file as the notes, so the notes and the
+app's settings share one file. Starring and visiting stay outside the undo history: a star is
 not an edit to a note, and neither is opening one.
 
 Two conventions the schema encodes deliberately:
@@ -103,8 +103,11 @@ ever visible.
 | --- | --- |
 | `create_page(name)` | Creates a page, or returns the existing one whose `name_key` matches. |
 | `ensure_page(name)` | Find-or-create a named page — what extraction calls when `[[Name]]` names something new. Empty names are refused with `BadPageName`. |
+| `rename_page(page, name)` | Renames a named page and rewrites the `[[links]]` and `#tags` that resolve to it outside code, as one undo step. Refuses dates, journal days, duplicates, and malformed names. Returns how many blocks changed and how many plain mentions were left. |
+| `delete_page(page)` | Removes a named page and its blocks as one undo step. Refused for journal days and while any block explicitly links to the page. |
 | `journal_page(date)` | **Lookup only**: the journal page for that date, or none. Reading never writes — that is what lets the column scroll past a year of empty days without creating them. |
 | `ensure_journal_page(date)` | Finds or creates the journal page for that date. Called only when something is actually written to the day. |
+| `is_date_name(name)` | Whether a name is a strict `YYYY-MM-DD` and therefore a journal day. Used by the view to open a day without writing a row. |
 | `insert_block(page, after, content)` | New block as the next sibling of `after` (or last child), with a key between its neighbours. |
 | `update_content(block, content)` | Re-extracts links and reindexes text. |
 | `split_block(block, offset)` | One command for Enter mid-block: keeps the text before `offset`, moves the rest into a new sibling. Splitting and inserting separately would show up as two undo steps. |
@@ -114,23 +117,30 @@ ever visible.
 | `set_scheduled(block, date)` | Sets or clears the scheduled date. Scheduling a block that is not a task also marks it TODO, in the same composite action, because the agenda lists tasks and a date on an untasked block would silently never appear. |
 | `set_scheduled_with_content(block, date, text)` | The same date rule with a rewritten text, again as one step. |
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
-| `move(block, page, after)` | Moves a block (with its subtree) between pages or positions. |
+| `move(block, page, after)` | Moves a block (with its subtree) between pages or positions; the subtree's page ownership follows it. |
+| `move_up(block)` / `move_down(block)` | Swaps a block with its previous or next sibling; the ends are no-ops. |
 | `delete_block(block)` | Removes the block and its subtree. |
 | `set_favourite(page, bool)` | Stars or unstars a page. Outside the undo history. |
 | `record_visit(page)` | Records that a page was opened, by bumping a counter. Outside the undo history. |
-| `set_collapsed(block, bool)` | Persists fold state. |
+| `set_collapsed(block, bool)` | Persists fold state. Outside the undo history. |
 | `undo()` / `redo()` | Apply the recorded inverse (or replay it) and return whether anything happened. |
 
 Page creation is deliberately **outside** the history: undoing the first block of a day leaves an empty
 page behind rather than deleting it. A page is an address, and an address that disappears under the
 cursor is worse than one that lingers.
 
+Renaming is one action, not a page update plus edits: the page row changes first, then every block whose
+markdown scan names the old key is rewritten and reindexed, and the inverse swaps both halves in the same
+order. Plain mentions are left as prose and counted in the result. Deleting is refused while `block_link`
+still holds a row for the page, because a surviving `[[link]]` would recreate it on the next save; plain
+mentions do not block. Journal days are never renamed or deleted.
+
 ## Queries
 
 | Query | Returns |
 | --- | --- |
 | `page_by_name(name_key)` | Page row, or none. |
-| `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
+| `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed`, `child_count` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
 | `pages()` | Every page, ordered by `name_key` — the page switcher's list. Written journal days are included, because a date is a name a block can link to; a day nobody wrote has no row, and scrolling the column is what reaches it. |
 | `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
@@ -169,7 +179,9 @@ stays an ordinary page, because `ensure_date` round-trips the string before acce
 Sibling order is a fractional key: a sortable string strictly between two neighbours, no renumbering on
 insert. Keys are generated in exactly one place in this crate, and the unique sibling index is the
 backstop against a duplicate. Repeated insertion into the same gap lengthens keys; at personal-note scale
-that is invisible, and a rebalance is therefore not implemented.
+that is invisible, and a rebalance is therefore not implemented. A cross-page move updates the moved
+block and every descendant's page ownership in the same composite action; the inverse restores both the
+position and the ownership.
 
 ## Code fences
 
@@ -221,27 +233,42 @@ bridge's business, not this crate's.
 
 ## Migrations
 
-`PRAGMA user_version` is the schema version. On open, steps run in order, each in its own transaction. A
+`PRAGMA user_version` is the schema version. On open, the pending steps run in order; each step's SQL and the `user_version` it claims commit in one transaction, so a failure leaves the file at the last version that fully applied and a retry does not meet a half-created schema. Before an older file's first step, `Store::open_with_migration_backup` writes `pre-migration-v<from>-to-v<to>-<timestamp>-<pid>.db` into the backups folder with `VACUUM INTO`; if that copy cannot be written, the upgrade does not run. A
 file whose version is **newer** than the binary supports is refused with an error rather than opened —
 better a clear refusal than a silently damaged graph. Opened files run `PRAGMA foreign_keys = ON` and WAL.
+The `tests/fixtures/v1.sql` and `v2.sql` files pin the older schemas, and `tests/migrations.rs` upgrades
+both, refuses a newer file, and proves a failed step rolls back.
+
+## Backups
+
+`backup_into` copies the live database with `VACUUM INTO` under `<target>.tmp`, renames it into place, and
+only then drops the previous target. A failure leaves the previous copy untouched. The policy — which
+names, how many of each kind — lives in `lognotes-qt`'s `backup` module; core only guarantees that a copy
+is consistent and that writing one cannot destroy the one it replaces.
 
 ## Export and import
 
-`export_markdown(store, directory)` and `import_markdown(store, directory)` move a whole graph through the
-folder of Markdown Logseq 0.x writes: `pages/<name>.md` and `journals/YYYY_MM_DD.md`, one bullet per block,
-two spaces per level, the marker after the dash, and `SCHEDULED: <date>` on its own indented line. The point
-is that the notes stay readable without this app, so the writer emits the shape Logseq reads and the reader
-accepts the shapes a real Logseq folder holds: tabs or spaces at any step, `id::`/`collapsed::` properties
-(ignored), single-colon `DEADLINE:` lines (ignored), multi-line blocks whose continuation lines keep their
-own indentation, and the extra markers (`LATER`, `NOW`, `WAITING`, `CANCELED`) mapped onto the three this
-app keeps.
+`export_markdown(store, directory)` and `import_markdown(store, directory, mode)` move a whole graph through
+the folder of Markdown Logseq 0.x writes: `pages/<name>.md` and `journals/YYYY_MM_DD.md`, one bullet per
+block, two spaces per level, the marker after the dash, and `SCHEDULED: <date>` on its own indented line. The
+point is that the notes stay readable without this app, so the writer emits the shape Logseq reads and the
+reader accepts the shapes a real Logseq folder holds: tabs or spaces at any step, `id::`/`collapsed::`
+properties (ignored), single-colon `DEADLINE:` lines (ignored), multi-line blocks whose continuation lines
+keep their own indentation, and the extra markers (`LATER`, `NOW`, `WAITING`, `CANCELED`) mapped onto the
+three this app keeps.
 
-Import places a bullet beside the nearest shallower block and then indents it once, which is the same
-`indent` the editor uses, so nesting arrives by the one code path that can produce it. A page name is
-escaped into a file name (`/` → `%2F`, `:` → `%3A`).
+Import reads and parses every file before it writes, then applies the whole folder in one transaction and
+records it as one undo step. `ImportMode::Merge` replaces the blocks of every page or day the folder names
+and leaves the rest alone, so re-importing the same folder is idempotent; `ImportMode::ReplaceAll` clears
+every block first and leaves pages the folder does not name as empty addresses. A bullet lands under the
+nearest shallower block using the store's own order keys, and page creation stays outside the undo history
+because a page is an address. A page name is escaped into a file name (`/` → `%2F`, `:` → `%3A`, `\` →
+`%5C`) and decoded on the way back.
 
 The round trip is tested as one test rather than as two halves: a graph with a marker, a schedule, a nested
-child, a link and a four-line code block is exported, imported into an empty store, and compared.
+child, a link and a four-line code block is exported, imported into an empty store, and compared. Separate
+tests cover page-level merge and its idempotence, replace-all with one undo, and an unreadable page failing
+before anything is written.
 
 ## Errors
 
@@ -270,11 +297,12 @@ the auto-marker.
 
 Also covered: `[[links]]` and `#tags` creating pages; a link becoming a linked reference and disappearing
 when the link is removed; a plain mention appearing once, never duplicating a linked block, and matching
-whole words only; mentions not creating pages; `pages()` listing named pages but not journals; and markers
+whole words only; mentions not creating pages; `pages()` listing named pages and written journal days; and markers
 and scheduled dates surviving a reindex.
 
-Still owed: restoring a moved subtree across pages keeping `block_link` and `block_fts` consistent (block
-reordering is not a capability yet).
+Covered from this capability: a cross-page move carries the subtree's page ownership and one undo restores both; moving into a descendant is refused. Folding hides children, survives a
+reopened store, and is not an undo step. Renaming rewrites links and tags outside code as one step, and
+deleting refuses while a link remains and restores the page and its blocks on undo.
 
 Markdown is covered separately in `markdown`'s own tests: each syntax's spans and their dim marks, nested
 emphasis, an unclosed marker staying plain, `snake_case` not italicising, links and tags with their

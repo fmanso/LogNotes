@@ -15,10 +15,10 @@ mod store;
 mod text;
 
 pub use error::{Error, Result};
-pub use export::{Moved, export_markdown, import_markdown};
+pub use export::{ImportMode, Moved, export_markdown, import_markdown};
 pub use model::{
     AgendaRow, BlockHit, BlockRow, JournalDay, Marker, Page, PageKind, ReferenceKind, ReferenceRow,
-    SearchResults,
+    Renamed, SearchResults,
 };
 pub use order::key_between;
-pub use store::Store;
+pub use store::{Store, is_date_name};
