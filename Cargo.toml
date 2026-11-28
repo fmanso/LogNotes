@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["lognotes-core", "lognotes-qt"]
+members = ["lognotes-core", "lognotes-qt", "lognotes-mcp"]
 
 [workspace.package]
 version = "0.1.0"

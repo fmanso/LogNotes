@@ -7,7 +7,9 @@
 //! module is compiled out of normal builds, so the shipped app carries neither the driver nor a test
 //! dependency.
 
+mod agent;
 mod backup;
+mod bridge;
 mod diagnostics;
 mod diagram;
 mod journal;

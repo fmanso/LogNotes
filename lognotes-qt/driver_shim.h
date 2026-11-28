@@ -94,3 +94,13 @@ bool lognotes_journal_ready();
 // dialogs do once they return. A native folder dialog cannot be driven headlessly, so the step after it
 // is driven here instead.
 bool lognotes_call_journal(const QString& method, const QString& argument);
+
+// Opens the QML object with this objectName through its own open() slot — how a dialog that normally
+// follows a native file picker is shown to the harness.
+bool lognotes_open_named(const QString& name);
+
+// Sets the app's agent-busy flag from the harness, as a focused block editor would.
+bool lognotes_set_agent_busy(bool busy);
+
+// Calls the window's closeSettings() function; Settings has no visible close control.
+bool lognotes_close_settings();

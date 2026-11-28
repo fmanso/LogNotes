@@ -273,6 +273,12 @@ with the command's effect and never types markdown into the block, and each comm
   the page's own colours. The date picker and the completion menus are cream panels with a hairline border
   and a tinted hover row, because the control style's default chrome is dark and the text drawn on it was
   `#242424` on `#2a2a2a` — a menu you could not read.
+- **Dialogs are skinned, not stock.** Every in-app modal dialog — rename, delete, move to page, import
+  mode, restore, and export — uses `ThemedDialog`: the page surface, a hairline border, a themed title,
+  and a themed modal overlay, with `QuietField` for its text inputs. A stock `Dialog` takes its panel and
+  header from the system palette, which is not the app's own light/dark theme: with a light app theme on
+  a dark desktop the panel and the dark-on-light labels collided, and the stock chrome read as another
+  application. The OS file and folder pickers are the exception; their appearance belongs to the platform.
 - **Links carry the theme's accent, inline.** Qt draws an anchor in the palette's stock link blue, which
   belongs to neither theme — harsh on a dark page, foreign on a cream one. Every rendered anchor therefore
   carries `style="color:…"` from the same palette as the fences, and keeps its underline as the affordance.
@@ -386,6 +392,28 @@ export is meant to be the safe copy, so it never overwrites notes without being 
 `⚙` is not used for the button: the gear resolves to the colour emoji font on this system and is drawn in
 its blue, so the button is a word, matching "Journal" beside it.
 
+## Agent bridge
+
+A local MCP adapter (`lognotes-mcp`) talks to the running app over a loopback HTTP channel. The app is the
+only writer: the bridge hands each request to the worker, which calls the same `Store` as every UI command.
+An agent write is one composite undo step, so `Ctrl+Z` can take back a whole consolidation.
+
+The listener binds `127.0.0.1` on an ephemeral port after the store is ready. It writes
+`lognotes-agent.json` beside the database with the port, a per-launch random token, and the process id;
+the file is user-only (0600 on Unix). Requests need `Authorization: Bearer <token>`. The token is never
+logged, and a stale file after a crash grants nothing because the next launch replaces both the token and
+the port. Closing the app closes the listener; the MCP binary then reports “LogNotes is not running”.
+
+The only write tool is `apply_project_consolidation`; reads are `get_project_context`, `search_notes`,
+`get_page`, `get_day`, `get_agenda`, and `get_backlinks`. There is no SQL, generic block edit, page delete,
+settings change, backup, restore, or file access in the bridge.
+
+A consolidation is refused with `editor_busy` while a block editor owns the caret. The QML editor reports
+focus through `set_agent_busy`; the bridge checks it before dispatching a write. Reads remain available.
+After a successful write the worker refreshes the view the app last asked for, through the ordinary
+snapshot path. A failure or timeout returns an error and leaves the notes unchanged. Each applied
+consolidation is logged with the project, through date, source-day count, and task counts.
+
 ## Single instance
 
 `start` takes an exclusive lock on `<database>.lock` before it dispatches the store open. The handle lives in
@@ -398,9 +426,9 @@ covered by a unit test; the two-window message is a manual check.
 
 `lognotes.log` sits beside the database. Its first line names the build version, the operating system, and
 the data path; after that it records startup, the data-folder lock, store open and migration copies, daily
-and manual backups, restores, imports and exports, and a panic with its location and backtrace. It rotates
-at 1 MiB and keeps three files. Logging is best effort: a log that cannot be written never stops the notes
-from opening.
+and manual backups, restores, imports and exports, applied agent consolidations with their counts, and a
+panic with its location and backtrace. It rotates at 1 MiB and keeps three files. Logging is best effort: a
+log that cannot be written never stops the notes from opening.
 
 ## Failure
 
@@ -416,10 +444,11 @@ the path of the copy that was kept.
 
 ## Packaging
 
-The released Linux artifact is a tarball (binary, `.desktop`, icon, README, licence) and the Windows artifact
-is a portable zip carrying its Qt libraries; README has the install steps and the SmartScreen note. No
-AppImage, Flatpak, or Windows installer is built: a one-click installer waits for a code-signing
-certificate, because an unsigned one adds no trust over the zip.
+The released Linux artifact is a tarball (both binaries, `.desktop`, icon, README, licence) and the Windows
+artifact is a portable zip carrying its Qt libraries and both executables; README has the install steps and
+the SmartScreen note. No AppImage, Flatpak, or Windows installer is built: a one-click installer waits for a
+code-signing certificate, because an unsigned one adds no trust over the zip. `lognotes-mcp` has no Qt
+dependency; it is shipped beside the app because the MCP configuration points at it.
 
 ## Known limitations
 
@@ -440,6 +469,11 @@ certificate, because an unsigned one adds no trust over the zip.
 The same scenario runs in `.github/workflows/livetest.yml` on a schedule under Xvfb, with the software Qt
 backend, and uploads its screenshots. It is non-blocking until it has a stable streak; the local `make
 livetest` remains the authoritative run.
+
+The scenario also calls the running app's loopback bridge: it checks project context, refuses a write with
+`editor_busy`, applies a digest and a task, reads the result back, and undoes it once. It screenshots the
+project page before, after, and after the undo. The bridge test uses the same control file and endpoint the
+MCP binary uses.
 
 The window can be driven without a person at the keyboard, which is how its input handling gets checked:
 

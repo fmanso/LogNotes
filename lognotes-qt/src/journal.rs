@@ -378,6 +378,11 @@ pub mod qobject {
         #[qinvokable]
         fn redo(self: Pin<&mut Self>);
 
+        /// Whether a block editor currently owns the caret. The bridge refuses a write while it does,
+        /// so an external consolidation cannot reset the model under unsaved text.
+        #[qinvokable]
+        fn set_agent_busy(self: Pin<&mut Self>, busy: bool);
+
         #[inherit]
         #[rust_name = "begin_reset_model"]
         fn beginResetModel(self: Pin<&mut Self>);
@@ -491,6 +496,8 @@ pub struct JournalRust {
     backup_path: QString,
     data_folder: QString,
     backup_folder: QString,
+    /// Whether the loopback agent bridge has been started for this process.
+    bridge_started: bool,
 }
 
 /// Where a block that does not exist yet has to be created: a journal day, or a named page.
@@ -565,7 +572,8 @@ enum PageActionKind {
     Delete,
 }
 
-enum Job {
+#[allow(private_interfaces)]
+pub(crate) enum Job {
     /// The quick switcher's query: no snapshot, just an answer.
     Search { query: String, queue: CxxQtThread<Journal> },
     Start {
@@ -600,6 +608,14 @@ enum Job {
     Flush {
         command: Command,
         done: Sender<()>,
+    },
+    /// One call from the local agent bridge. The worker answers on `reply`; a write also refreshes the
+    /// view so the app shows what the agent did.
+    Agent {
+        method: String,
+        params: serde_json::Value,
+        queue: CxxQtThread<Journal>,
+        reply: Sender<Result<String, String>>,
     },
 }
 
@@ -1254,6 +1270,26 @@ impl qobject::Journal {
         self.as_mut().dispatch(Some(Command::Redo));
     }
 
+    fn set_agent_busy(self: Pin<&mut Self>, busy: bool) {
+        crate::bridge::set_busy(busy);
+    }
+
+    fn start_bridge(mut self: Pin<&mut Self>) {
+        if self.bridge_started {
+            return;
+        }
+        let Some(database) = DATABASE_PATH.get() else {
+            return;
+        };
+        let Some(worker) = self.worker.clone() else {
+            return;
+        };
+        let queue = self.as_mut().qt_thread();
+        if crate::bridge::start(database, worker, queue) {
+            self.as_mut().rust_mut().bridge_started = true;
+        }
+    }
+
     fn dispatch(mut self: Pin<&mut Self>, command: Option<Command>) {
         let dates = self.dates.clone();
         if dates.is_empty() || self.worker.is_none() {
@@ -1281,6 +1317,10 @@ impl qobject::Journal {
             self.as_mut().set_ready(false);
             self.as_mut().bump_revision();
             return;
+        }
+
+        if outcome.ready {
+            self.as_mut().start_bridge();
         }
 
         self.as_mut().begin_reset_model();
@@ -1422,10 +1462,15 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
     let mut store: Option<Store> = None;
     // Diagrams are drawn here, off the GUI thread, and remembered by content hash.
     let mut diagrams = Diagrams::default();
+    // The latest view the app asked for. An agent write refreshes that view after it lands.
+    let mut current_dates: Vec<String> = Vec::new();
+    let mut current_mode = Mode::Journal;
 
     while let Ok(job) = rx.recv() {
         match job {
             Job::Start { dates, mode, queue } => {
+                current_dates = dates.clone();
+                current_mode = mode.clone();
                 let opened = match DATABASE_PATH.get() {
                     // The storage error already names the file, so it is not appended again. Opening
                     // through the backup-aware path makes an upgrade write the pre-migration copy.
@@ -1494,6 +1539,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 mode,
                 queue,
             } => {
+                current_dates = dates.clone();
+                current_mode = mode.clone();
                 let Some(store) = store.as_mut() else {
                     continue;
                 };
@@ -1526,6 +1573,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 mode,
                 queue,
             } => {
+                current_dates = dates.clone();
+                current_mode = mode.clone();
                 if let SettingsAction::Restore(backup) = &action {
                     let Some(database) = DATABASE_PATH.get() else {
                         continue;
@@ -1687,6 +1736,35 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                     deliver(queue, outcome);
                 }
             }
+            Job::Agent {
+                method,
+                params,
+                queue,
+                reply,
+            } => {
+                let Some(store) = store.as_mut() else {
+                    let _ = reply.send(Err("LogNotes is not ready".to_string()));
+                    continue;
+                };
+                let answer = crate::agent::handle(store, &method, &params);
+                if answer.changed {
+                    if let Ok(json_text) = &answer.result {
+                        if let Some(line) = crate::agent::audit_line(&params, json_text) {
+                            crate::diagnostics::info(&line);
+                        }
+                    }
+                    let theme = theme_name(store);
+                    let outcome = snapshot(
+                        store,
+                        &current_dates,
+                        &current_mode,
+                        &mut diagrams,
+                        &theme,
+                    );
+                    deliver(queue, outcome);
+                }
+                let _ = reply.send(answer.result);
+            }
             Job::Flush { command, done } => {
                 if let Some(store) = store.as_mut() {
                     let _ = run_command(store, command);
@@ -1699,6 +1777,8 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                 mode,
                 queue,
             } => {
+                current_dates = dates.clone();
+                current_mode = mode.clone();
                 let Some(store) = store.as_mut() else {
                     continue;
                 };

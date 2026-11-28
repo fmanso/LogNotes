@@ -20,7 +20,7 @@ build:
 
 ## Build the app (release).
 release:
-	$(SLICE) bash -c 'cd $(CURDIR) && $(JOBS) cargo build -p lognotes-qt --release'
+	$(SLICE) bash -c 'cd $(CURDIR) && $(JOBS) cargo build -p lognotes-qt -p lognotes-mcp --release'
 
 ## Every unit test, core and bridge.
 test:
@@ -39,6 +39,7 @@ dist: release
 	rm -rf dist/stage
 	mkdir -p dist/stage/lognotes-$(VERSION)
 	cp target/release/lognotes-qt dist/stage/lognotes-$(VERSION)/
+	cp target/release/lognotes-mcp dist/stage/lognotes-$(VERSION)/
 	cp packaging/lognotes.desktop packaging/lognotes.svg README.md LICENSE dist/stage/lognotes-$(VERSION)/
 	tar -czf dist/lognotes-$(VERSION)-linux-$(ARCH).tar.gz -C dist/stage lognotes-$(VERSION)
 	@echo dist/lognotes-$(VERSION)-linux-$(ARCH).tar.gz

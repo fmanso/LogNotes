@@ -3,10 +3,10 @@
 //! Every mutation goes through `Store::exec`, which is the single point that records an inverse action.
 //! Nothing else may write, so no command can forget to be undoable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use chrono::{Days, NaiveDate, Utc};
+use chrono::{Days, Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Error, Result};
@@ -18,6 +18,10 @@ use crate::model::{
     ReferenceRow, Renamed, SearchResults,
 };
 use crate::order::key_between;
+use crate::project::{
+    self, BlockRef, BriefItem, ConsolidationRequest, ConsolidationResult, DigestInfo,
+    ProjectContext, ProjectSource, TaskRef, TaskToCreate, TaskUpdate,
+};
 use crate::text::{extract_links, mentions_whole_words};
 
 const SCHEMA_VERSION: i64 = 3;
@@ -1203,6 +1207,606 @@ impl Store {
         Ok(out)
     }
 
+    /// Context for consolidating one named project page.
+    ///
+    /// Sources are journal blocks that explicitly link the page. Each source is returned with its
+    /// descendants and ancestor framing. The project page itself, and any `[agent]` task subtree, is
+    /// excluded. Plain mentions are not sources.
+    pub fn project_context(
+        &self,
+        page_name: &str,
+        since: Option<&str>,
+        full: bool,
+    ) -> Result<ProjectContext> {
+        let page = self
+            .page_by_name(page_name)?
+            .ok_or_else(|| Error::PageNotFound(page_name.to_string()))?;
+        if page.kind != PageKind::Page {
+            return Err(Error::InvalidConsolidation(
+                "a project must be a named page, not a journal day".to_string(),
+            ));
+        }
+        if let Some(since) = since {
+            ensure_date(since)?;
+        }
+
+        let blocks = self.page_blocks_all(page.id)?;
+        let digest_roots: Vec<&BlockRow> = blocks
+            .iter()
+            .filter(|block| {
+                block.parent_id.is_none() && block.content.trim() == project::DIGEST_HEADING
+            })
+            .collect();
+        if digest_roots.len() > 1 {
+            return Err(Error::InvalidConsolidation(
+                "the project page has more than one agent digest section".to_string(),
+            ));
+        }
+        let digest_root = digest_roots.first().copied();
+        let digest_blocks = digest_root
+            .map(|root| descendants_of(&blocks, root.id))
+            .unwrap_or_default();
+        let last_consolidated = digest_blocks
+            .iter()
+            .find(|block| block.content.trim_start().starts_with(project::LAST_CONSOLIDATED_PREFIX))
+            .and_then(|block| project::first_date_link(&block.content));
+        let digest_ids: HashSet<i64> = digest_root
+            .map(|root| {
+                std::iter::once(root.id)
+                    .chain(digest_blocks.iter().map(|block| block.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let human_notes = blocks
+            .iter()
+            .filter(|block| !digest_ids.contains(&block.id))
+            .map(block_ref)
+            .collect();
+
+        let digest = DigestInfo {
+            exists: digest_root.is_some(),
+            block_id: digest_root.map(|block| block.id),
+            last_consolidated: last_consolidated.clone(),
+            blocks: digest_blocks,
+            human_notes,
+        };
+
+        let effective_since = if full {
+            None
+        } else {
+            since.map(str::to_string).or_else(|| last_consolidated.clone())
+        };
+        let all_sources = self.project_sources(page.id)?;
+        let latest_day = all_sources.iter().map(|source| source.day.clone()).max();
+        let nothing_new = match (effective_since.as_deref(), latest_day.as_deref()) {
+            (Some(since), Some(latest)) => latest <= since,
+            (Some(_), None) => true,
+            (None, None) => true,
+            (None, Some(_)) => false,
+        };
+        let sources = all_sources
+            .into_iter()
+            .filter(|source| {
+                effective_since
+                    .as_deref()
+                    .is_none_or(|since| source.day.as_str() > since)
+            })
+            .collect();
+
+        let agent_tasks = self.agent_tasks(page.id)?;
+        let human_open_tasks = self.human_open_tasks(page.id)?;
+
+        Ok(ProjectContext {
+            project: page,
+            digest,
+            sources,
+            agent_tasks,
+            human_open_tasks,
+            nothing_new,
+        })
+    }
+
+    /// Apply one project consolidation as a single undoable action.
+    pub fn apply_consolidation(
+        &mut self,
+        request: &ConsolidationRequest,
+    ) -> Result<ConsolidationResult> {
+        let page = self
+            .page_by_name(&request.page)?
+            .ok_or_else(|| Error::PageNotFound(request.page.clone()))?;
+        if page.kind != PageKind::Page {
+            return Err(Error::InvalidConsolidation(
+                "a project must be a named page, not a journal day".to_string(),
+            ));
+        }
+
+        let through_date = ensure_date(&request.through)?;
+        let today = Local::now().date_naive();
+        if through_date > today {
+            return Err(Error::BadDate(format!(
+                "{} is in the future",
+                request.through
+            )));
+        }
+        validate_consolidation_text(request, &page)?;
+
+        let blocks = self.page_blocks_all(page.id)?;
+        let digest_roots: Vec<&BlockRow> = blocks
+            .iter()
+            .filter(|block| {
+                block.parent_id.is_none() && block.content.trim() == project::DIGEST_HEADING
+            })
+            .collect();
+        if digest_roots.len() > 1 {
+            return Err(Error::InvalidConsolidation(
+                "the project page has more than one agent digest section".to_string(),
+            ));
+        }
+        let previous_last = digest_roots
+            .first()
+            .map(|root| descendants_of(&blocks, root.id))
+            .unwrap_or_default()
+            .iter()
+            .find(|block| block.content.trim_start().starts_with(project::LAST_CONSOLIDATED_PREFIX))
+            .and_then(|block| project::first_date_link(&block.content));
+        let source_days = self.source_days(page.id, previous_last.as_deref(), &request.through)?;
+
+        let new_tasks = self.new_agent_tasks(page.id, &request.tasks_to_create)?;
+        let updates = self.closable_agent_tasks(&request.task_updates)?;
+        let has_digest_content =
+            !request.brief.is_empty() || !request.timeline_entries.is_empty();
+        if !has_digest_content && new_tasks.is_empty() && updates.is_empty() {
+            return Ok(ConsolidationResult {
+                applied: false,
+                through: request.through.clone(),
+                source_days,
+                tasks_created: 0,
+                tasks_closed: 0,
+                digest_block_id: digest_roots.first().map(|block| block.id),
+                task_root_block_id: None,
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut inverses: Vec<Action> = Vec::new();
+        let today_string = today.format("%Y-%m-%d").to_string();
+
+        let digest_id = ensure_digest_root(&tx, page.id, &mut inverses)?;
+        let children = direct_children(&tx, digest_id)?;
+        let last_id = children
+            .iter()
+            .find(|(_, content, _)| content.trim_start().starts_with(project::LAST_CONSOLIDATED_PREFIX))
+            .map(|(id, _, _)| *id);
+        let timeline_id = children
+            .iter()
+            .find(|(_, content, _)| content.trim() == project::TIMELINE_HEADING)
+            .map(|(id, _, _)| *id);
+
+        for (id, content, _) in &children {
+            let keep = Some(*id) == last_id
+                || Some(*id) == timeline_id
+                || content.trim_start().starts_with(project::LAST_CONSOLIDATED_PREFIX)
+                || content.trim() == project::TIMELINE_HEADING;
+            if !keep {
+                inverses.push(apply_action(&tx, &Action::Delete { block_id: *id })?);
+            }
+        }
+
+        let last_content = format!(
+            "{} [[{}]]",
+            project::LAST_CONSOLIDATED_PREFIX,
+            request.through
+        );
+        let last_id = match last_id {
+            Some(id) => {
+                update_block_content(&tx, id, &last_content, &mut inverses)?;
+                id
+            }
+            None => insert_digest_child_at_start(
+                &tx,
+                page.id,
+                digest_id,
+                &last_content,
+                &mut inverses,
+            )?,
+        };
+        let last_key = block_record(&tx, last_id)?.order_key;
+
+        let timeline_id = match timeline_id {
+            Some(id) => id,
+            None => insert_digest_child_at_end(
+                &tx,
+                page.id,
+                digest_id,
+                project::TIMELINE_HEADING,
+                &mut inverses,
+            )?,
+        };
+        let timeline_key = block_record(&tx, timeline_id)?.order_key;
+
+        // Brief sections are direct children between the last-consolidated line and the timeline.
+        let mut previous_key = last_key;
+        let mut insert_brief_section =
+            |heading: &str, items: &[BriefItem], previous_key: &mut String| -> Result<()> {
+                let key = key_between(Some(previous_key.as_str()), Some(timeline_key.as_str()))?;
+                let id = insert_block_at(
+                    &tx,
+                    page.id,
+                    Some(digest_id),
+                    &key,
+                    heading,
+                    None,
+                    None,
+                    &mut inverses,
+                )?;
+                *previous_key = key;
+                for item in items {
+                    let content = project::format_brief_item(item);
+                    append_child(&tx, page.id, id, &content, None, &mut inverses)?;
+                }
+                Ok(())
+            };
+        insert_brief_section(
+            "### Current state",
+            &request.brief.current_state,
+            &mut previous_key,
+        )?;
+        insert_brief_section(
+            "### Decisions",
+            &request.brief.decisions,
+            &mut previous_key,
+        )?;
+        insert_brief_section(
+            "### Open questions",
+            &request.brief.open_questions,
+            &mut previous_key,
+        )?;
+        drop(insert_brief_section);
+
+        // Merge timeline entries by date: one child per day.
+        for entry in &request.timeline_entries {
+            ensure_date(&entry.date)?;
+            let content = project::format_timeline_entry(&entry.date, &entry.text);
+            let entries = direct_children(&tx, timeline_id)?;
+            let mut matches: Vec<i64> = entries
+                .iter()
+                .filter(|(_, content, _)| {
+                    project::timeline_entry_date(content).as_deref() == Some(entry.date.as_str())
+                })
+                .map(|(id, _, _)| *id)
+                .collect();
+            if let Some(first) = matches.first().copied() {
+                update_block_content(&tx, first, &content, &mut inverses)?;
+                for duplicate in matches.drain(1..) {
+                    inverses.push(apply_action(
+                        &tx,
+                        &Action::Delete { block_id: duplicate },
+                    )?);
+                }
+            } else {
+                append_child(
+                    &tx,
+                    page.id,
+                    timeline_id,
+                    &content,
+                    None,
+                    &mut inverses,
+                )?;
+            }
+        }
+
+        let mut task_root_block_id = None;
+        if !new_tasks.is_empty() {
+            let today_page = ensure_journal_page_on(&tx, &today_string)?;
+            let root_id = find_or_create_agent_task_root(
+                &tx,
+                today_page,
+                page.id,
+                &page.name,
+                &mut inverses,
+            )?;
+            task_root_block_id = Some(root_id);
+            for task in &new_tasks {
+                let content = project::format_task(&task.text, &task.source_day);
+                append_child(
+                    &tx,
+                    today_page,
+                    root_id,
+                    &content,
+                    Some(Marker::Todo),
+                    &mut inverses,
+                )?;
+            }
+        }
+
+        for block_id in &updates {
+            inverses.push(apply_action(
+                &tx,
+                &Action::SetMarker {
+                    block_id: *block_id,
+                    marker: Some(Marker::Done),
+                },
+            )?);
+        }
+
+        tx.commit()?;
+        inverses.reverse();
+        self.undo.push(Action::Composite(inverses));
+        self.redo.clear();
+
+        Ok(ConsolidationResult {
+            applied: true,
+            through: request.through.clone(),
+            source_days,
+            tasks_created: new_tasks.len(),
+            tasks_closed: updates.len(),
+            digest_block_id: Some(digest_id),
+            task_root_block_id,
+        })
+    }
+
+    fn project_sources(&self, project_id: i64) -> Result<Vec<ProjectSource>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.page_id, p.journal_date
+             FROM block_link l
+             JOIN block b ON b.id = l.block_id
+             JOIN page p ON p.id = b.page_id
+             WHERE l.page_id = ?1 AND p.kind = 'journal' AND l.kind IN ('link', 'tag')
+             ORDER BY p.journal_date, b.order_key",
+        )?;
+        let refs = stmt
+            .query_map([project_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut by_page: HashMap<i64, Vec<BlockRow>> = HashMap::new();
+        for (_, page_id, _) in &refs {
+            if !by_page.contains_key(page_id) {
+                by_page.insert(*page_id, self.page_blocks_all(*page_id)?);
+            }
+        }
+
+        let mut sources = Vec::new();
+        for day in refs.iter().map(|(_, _, day)| day.clone()).collect::<HashSet<_>>() {
+            let day_refs: Vec<(i64, i64)> = refs
+                .iter()
+                .filter(|(_, _, d)| *d == day)
+                .map(|(block_id, page_id, _)| (*block_id, *page_id))
+                .collect();
+            let ref_ids: HashSet<i64> = day_refs.iter().map(|(id, _)| *id).collect();
+            for (block_id, page_id) in day_refs {
+                let blocks = &by_page[&page_id];
+                let Some(root_id) = top_root_id(blocks, block_id) else {
+                    continue;
+                };
+                let Some(root) = blocks.iter().find(|block| block.id == root_id) else {
+                    continue;
+                };
+                if project::is_agent_root(&root.content) {
+                    continue;
+                }
+                // A descendant reference under a reference root is already in that root's subtree.
+                if ancestors_of(blocks, block_id)
+                    .iter()
+                    .any(|ancestor| ref_ids.contains(&ancestor.id))
+                {
+                    continue;
+                }
+                let Some(block) = blocks.iter().find(|block| block.id == block_id) else {
+                    continue;
+                };
+                sources.push(ProjectSource {
+                    day: day.clone(),
+                    root: block_ref(block),
+                    ancestors: ancestors_of(blocks, block_id),
+                    children: descendants_of(blocks, block_id),
+                });
+            }
+        }
+        sources.sort_by(|left, right| {
+            left.day
+                .cmp(&right.day)
+                .then_with(|| left.root.content.cmp(&right.root.content))
+        });
+        Ok(sources)
+    }
+
+    fn source_days(
+        &self,
+        project_id: i64,
+        since: Option<&str>,
+        through: &str,
+    ) -> Result<Vec<String>> {
+        let mut days: Vec<String> = self
+            .project_sources(project_id)?
+            .into_iter()
+            .map(|source| source.day)
+            .filter(|day| day.as_str() <= through)
+            .filter(|day| since.is_none_or(|since| day.as_str() > since))
+            .collect();
+        days.sort();
+        days.dedup();
+        Ok(days)
+    }
+
+    fn agent_tasks(&self, project_id: i64) -> Result<Vec<TaskRef>> {
+        let roots = self.agent_task_roots(project_id)?;
+        let mut tasks = Vec::new();
+        for (root_id, page_id, day) in roots {
+            let blocks = self.page_blocks_all(page_id)?;
+            for block in descendants_of(&blocks, root_id) {
+                if block.marker.is_none() {
+                    continue;
+                }
+                tasks.push(TaskRef {
+                    block_id: block.id,
+                    text: block.content.clone(),
+                    marker: block.marker,
+                    source_day: project::first_date_link(&block.content),
+                    page_name: day.clone(),
+                    journal_date: Some(day.clone()),
+                    agent_owned: true,
+                });
+            }
+        }
+        Ok(tasks)
+    }
+
+    fn human_open_tasks(&self, project_id: i64) -> Result<Vec<TaskRef>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.page_id, p.name, p.journal_date, b.content, b.marker
+             FROM block_link l
+             JOIN block b ON b.id = l.block_id
+             JOIN page p ON p.id = b.page_id
+             WHERE l.page_id = ?1 AND b.marker IN ('TODO', 'DOING')
+               AND l.kind IN ('link', 'tag')
+             ORDER BY p.journal_date IS NULL, p.journal_date DESC, b.order_key",
+        )?;
+        let rows = stmt
+            .query_map([project_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut tasks = Vec::new();
+        for (block_id, page_id, page_name, journal_date, content, marker) in rows {
+            let blocks = self.page_blocks_all(page_id)?;
+            let Some(root_id) = top_root_id(&blocks, block_id) else {
+                continue;
+            };
+            let Some(root) = blocks.iter().find(|block| block.id == root_id) else {
+                continue;
+            };
+            if project::is_agent_root(&root.content) {
+                continue;
+            }
+            tasks.push(TaskRef {
+                block_id,
+                text: content.clone(),
+                marker: marker.as_deref().and_then(Marker::parse),
+                source_day: journal_date.clone().or_else(|| project::first_date_link(&content)),
+                page_name,
+                journal_date,
+                agent_owned: false,
+            });
+        }
+        Ok(tasks)
+    }
+
+    fn agent_task_roots(&self, project_id: i64) -> Result<Vec<(i64, i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.page_id, p.journal_date
+             FROM block b
+             JOIN page p ON p.id = b.page_id
+             WHERE p.kind = 'journal' AND b.parent_id IS NULL
+               AND substr(trim(b.content), 1, 7) = ?2
+               AND EXISTS (SELECT 1 FROM block_link l
+                           WHERE l.block_id = b.id AND l.page_id = ?1)
+             ORDER BY p.journal_date, b.order_key",
+        )?;
+        Ok(stmt
+            .query_map(params![project_id, project::AGENT_PREFIX], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn new_agent_tasks(
+        &self,
+        project_id: i64,
+        proposed: &[TaskToCreate],
+    ) -> Result<Vec<TaskToCreate>> {
+        let mut existing = HashSet::new();
+        for (root_id, page_id, _) in self.agent_task_roots(project_id)? {
+            let blocks = self.page_blocks_all(page_id)?;
+            for block in descendants_of(&blocks, root_id) {
+                if block.marker.is_none() {
+                    continue;
+                }
+                if let Some(day) = project::first_date_link(&block.content) {
+                    existing.insert((
+                        day,
+                        project::normalized_task_text(&block.content),
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for task in proposed {
+            ensure_date(&task.source_day)?;
+            let key = (
+                task.source_day.clone(),
+                project::normalized_task_text(&task.text),
+            );
+            if existing.insert(key) {
+                out.push(task.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    fn closable_agent_tasks(&self, updates: &[TaskUpdate]) -> Result<Vec<i64>> {
+        let mut out = Vec::new();
+        for update in updates {
+            if update.marker != Marker::Done {
+                return Err(Error::InvalidConsolidation(
+                    "only closing an agent task is supported".to_string(),
+                ));
+            }
+            let page_id: i64 = self
+                .conn
+                .query_row(
+                    "SELECT page_id FROM block WHERE id = ?1",
+                    [update.block_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(Error::NotFound(update.block_id))?;
+            let blocks = self.page_blocks_all(page_id)?;
+            let Some(root_id) = top_root_id(&blocks, update.block_id) else {
+                continue;
+            };
+            let Some(root) = blocks.iter().find(|block| block.id == root_id) else {
+                continue;
+            };
+            if !project::is_agent_root(&root.content) {
+                return Err(Error::InvalidConsolidation(
+                    "a task outside an [agent] root cannot be closed".to_string(),
+                ));
+            }
+            if root_id == update.block_id {
+                return Err(Error::InvalidConsolidation(
+                    "the task root itself cannot be closed".to_string(),
+                ));
+            }
+            let Some(block) = blocks.iter().find(|block| block.id == update.block_id) else {
+                return Err(Error::NotFound(update.block_id));
+            };
+            if block.marker.is_none() {
+                return Err(Error::InvalidConsolidation(
+                    "only a marked task can be closed".to_string(),
+                ));
+            }
+            if block.marker != Some(Marker::Done) {
+                out.push(update.block_id);
+            }
+        }
+        Ok(out)
+    }
+
+
     /// Delete a block and everything under it. One undo step restores the whole subtree.
     pub fn delete_block(&mut self, block_id: i64) -> Result<()> {
         self.exec(Action::Delete { block_id })
@@ -1255,32 +1859,13 @@ impl Store {
 
     /// Every block of a page, flattened in render order with its depth.
     pub fn page_blocks(&self, page_id: i64) -> Result<Vec<BlockRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, order_key, content, marker, scheduled_date, collapsed
-             FROM block WHERE page_id = ?1 ORDER BY order_key",
-        )?;
-        let raw = stmt
-            .query_map([page_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, bool>(6)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<RawBlock>>>()?;
+        blocks_of_page(&self.conn, page_id, false)
+    }
 
-        let mut by_parent: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
-        for (index, row) in raw.iter().enumerate() {
-            by_parent.entry(row.1).or_default().push(index);
-        }
-
-        let mut out = Vec::with_capacity(raw.len());
-        push_rows(&raw, &by_parent, None, 0, &mut out);
-        Ok(out)
+    /// Every block of a page, including descendants of folded blocks. Agent context must see what a
+    /// folded view hides: a project's history is not gone because the user folded it.
+    pub fn page_blocks_all(&self, page_id: i64) -> Result<Vec<BlockRow>> {
+        blocks_of_page(&self.conn, page_id, true)
     }
 
     /// One journal day, created or not.
@@ -1922,11 +2507,399 @@ fn subtree(conn: &Connection, root: i64) -> Result<Vec<BlockRecord>> {    let mu
     Ok(out)
 }
 
+fn block_ref(block: &BlockRow) -> BlockRef {
+    BlockRef {
+        id: block.id,
+        parent_id: block.parent_id,
+        depth: block.depth,
+        content: block.content.clone(),
+        marker: block.marker,
+        scheduled_date: block.scheduled_date.clone(),
+    }
+}
+
+fn top_root_id(blocks: &[BlockRow], id: i64) -> Option<i64> {
+    let mut current = id;
+    loop {
+        let block = blocks.iter().find(|block| block.id == current)?;
+        match block.parent_id {
+            Some(parent) => current = parent,
+            None => return Some(current),
+        }
+    }
+}
+
+fn ancestors_of(blocks: &[BlockRow], id: i64) -> Vec<BlockRef> {
+    let mut out = Vec::new();
+    let mut current = blocks
+        .iter()
+        .find(|block| block.id == id)
+        .and_then(|block| block.parent_id);
+    while let Some(parent) = current {
+        let Some(block) = blocks.iter().find(|block| block.id == parent) else {
+            break;
+        };
+        out.push(block_ref(block));
+        current = block.parent_id;
+    }
+    out.reverse();
+    out
+}
+
+fn descendants_of(blocks: &[BlockRow], id: i64) -> Vec<BlockRef> {
+    let Some(index) = blocks.iter().position(|block| block.id == id) else {
+        return Vec::new();
+    };
+    let depth = blocks[index].depth;
+    blocks[index + 1..]
+        .iter()
+        .take_while(|block| block.depth > depth)
+        .map(block_ref)
+        .collect()
+}
+
+fn direct_children(conn: &Connection, parent_id: i64) -> Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, order_key FROM block WHERE parent_id = ?1 ORDER BY order_key",
+    )?;
+    Ok(stmt
+        .query_map([parent_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn validate_consolidation_text(request: &ConsolidationRequest, page: &Page) -> Result<()> {
+    let mut size = 0usize;
+    for item in request
+        .brief
+        .current_state
+        .iter()
+        .chain(&request.brief.decisions)
+        .chain(&request.brief.open_questions)
+    {
+        check_consolidation_item(&item.text, &item.sources, page, &mut size)?;
+    }
+    for entry in &request.timeline_entries {
+        ensure_date(&entry.date)?;
+        if entry.date.as_str() > request.through.as_str() {
+            return Err(Error::InvalidConsolidation(
+                "a timeline entry is later than the through date".to_string(),
+            ));
+        }
+        check_consolidation_item(&entry.text, std::slice::from_ref(&entry.date), page, &mut size)?;
+    }
+    for task in &request.tasks_to_create {
+        size += task.text.len() + task.source_day.len();
+        if size > project::MAX_CONSOLIDATION_TEXT {
+            return Err(Error::InvalidConsolidation(
+                "the consolidation payload is too large".to_string(),
+            ));
+        }
+        if task.text.trim().is_empty() {
+            return Err(Error::InvalidConsolidation(
+                "a task cannot be empty".to_string(),
+            ));
+        }
+        ensure_date(&task.source_day)?;
+        if task.source_day.as_str() > request.through.as_str() {
+            return Err(Error::InvalidConsolidation(
+                "a task source is later than the through date".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_consolidation_item(
+    text: &str,
+    sources: &[String],
+    page: &Page,
+    size: &mut usize,
+) -> Result<()> {
+    *size += text.len() + sources.iter().map(String::len).sum::<usize>();
+    if *size > project::MAX_CONSOLIDATION_TEXT {
+        return Err(Error::InvalidConsolidation(
+            "the consolidation payload is too large".to_string(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(Error::InvalidConsolidation(
+            "a digest item cannot be empty".to_string(),
+        ));
+    }
+    if contains_self_link(text, page) {
+        return Err(Error::InvalidConsolidation(
+            "the digest cannot link the page it lives on".to_string(),
+        ));
+    }
+    for source in sources {
+        ensure_date(source)?;
+    }
+    Ok(())
+}
+
+fn contains_self_link(text: &str, page: &Page) -> bool {
+    markdown::scan(text).links.iter().any(|link| {
+        matches!(link.kind, LinkKind::Page | LinkKind::Tag)
+            && page_key(&link.target) == page.name_key
+    })
+}
+
+fn ensure_digest_root(
+    conn: &Connection,
+    page_id: i64,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM block
+         WHERE page_id = ?1 AND parent_id IS NULL AND trim(content) = ?2
+         ORDER BY order_key",
+    )?;
+    let mut roots = stmt
+        .query_map(params![page_id, project::DIGEST_HEADING], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if roots.len() > 1 {
+        return Err(Error::InvalidConsolidation(
+            "the project page has more than one agent digest section".to_string(),
+        ));
+    }
+    if let Some(root) = roots.pop() {
+        return Ok(root);
+    }
+
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT order_key FROM block
+             WHERE page_id = ?1 AND parent_id IS NULL
+             ORDER BY order_key LIMIT 1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let key = key_between(None, first.as_deref())?;
+    insert_block_at(
+        conn,
+        page_id,
+        None,
+        &key,
+        project::DIGEST_HEADING,
+        None,
+        None,
+        inverses,
+    )
+}
+
+fn insert_digest_child_at_start(
+    conn: &Connection,
+    page_id: i64,
+    digest_id: i64,
+    content: &str,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let first = direct_children(conn, digest_id)?
+        .first()
+        .map(|(_, _, key)| key.clone());
+    let key = key_between(None, first.as_deref())?;
+    insert_block_at(
+        conn,
+        page_id,
+        Some(digest_id),
+        &key,
+        content,
+        None,
+        None,
+        inverses,
+    )
+}
+
+fn insert_digest_child_at_end(
+    conn: &Connection,
+    page_id: i64,
+    digest_id: i64,
+    content: &str,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let last = direct_children(conn, digest_id)?
+        .last()
+        .map(|(_, _, key)| key.clone());
+    let key = key_between(last.as_deref(), None)?;
+    insert_block_at(
+        conn,
+        page_id,
+        Some(digest_id),
+        &key,
+        content,
+        None,
+        None,
+        inverses,
+    )
+}
+
+fn insert_block_at(
+    conn: &Connection,
+    page_id: i64,
+    parent_id: Option<i64>,
+    order_key: &str,
+    content: &str,
+    marker: Option<Marker>,
+    scheduled_date: Option<String>,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let id = next_block_id_on(conn)?;
+    let now = now();
+    let record = BlockRecord {
+        id,
+        page_id,
+        parent_id,
+        order_key: order_key.to_string(),
+        content: content.to_string(),
+        marker,
+        scheduled_date,
+        collapsed: false,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    inverses.push(apply_action(conn, &Action::Insert { record })?);
+    Ok(id)
+}
+
+fn append_child(
+    conn: &Connection,
+    page_id: i64,
+    parent_id: i64,
+    content: &str,
+    marker: Option<Marker>,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let last = last_child_key(conn, parent_id)?;
+    let key = key_between(last.as_deref(), None)?;
+    insert_block_at(
+        conn,
+        page_id,
+        Some(parent_id),
+        &key,
+        content,
+        marker,
+        None,
+        inverses,
+    )
+}
+
+fn update_block_content(
+    conn: &Connection,
+    block_id: i64,
+    content: &str,
+    inverses: &mut Vec<Action>,
+) -> Result<()> {
+    let current: String = conn.query_row(
+        "SELECT content FROM block WHERE id = ?1",
+        [block_id],
+        |row| row.get(0),
+    )?;
+    if current != content {
+        inverses.push(apply_action(
+            conn,
+            &Action::SetContent {
+                block_id,
+                content: content.to_string(),
+            },
+        )?);
+    }
+    Ok(())
+}
+
+fn find_or_create_agent_task_root(
+    conn: &Connection,
+    page_id: i64,
+    project_id: i64,
+    project_name: &str,
+    inverses: &mut Vec<Action>,
+) -> Result<i64> {
+    let mut stmt = conn.prepare(
+        "SELECT b.id
+         FROM block b
+         JOIN block_link l ON l.block_id = b.id
+         WHERE b.page_id = ?1 AND b.parent_id IS NULL
+           AND substr(trim(b.content), 1, 7) = ?2 AND l.page_id = ?3
+         ORDER BY b.order_key",
+    )?;
+    let mut roots = stmt
+        .query_map(
+            params![page_id, project::AGENT_PREFIX, project_id],
+            |row| row.get::<_, i64>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if roots.len() > 1 {
+        return Err(Error::InvalidConsolidation(
+            "the journal day has more than one matching agent task root".to_string(),
+        ));
+    }
+    if let Some(root) = roots.pop() {
+        return Ok(root);
+    }
+
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT order_key FROM block
+             WHERE page_id = ?1 AND parent_id IS NULL
+             ORDER BY order_key LIMIT 1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let key = key_between(None, first.as_deref())?;
+    let content = format!("{} [[{project_name}]] tasks", project::AGENT_PREFIX);
+    insert_block_at(
+        conn,
+        page_id,
+        None,
+        &key,
+        &content,
+        None,
+        None,
+        inverses,
+    )
+}
+
+
+fn blocks_of_page(conn: &Connection, page_id: i64, include_collapsed: bool) -> Result<Vec<BlockRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, order_key, content, marker, scheduled_date, collapsed
+         FROM block WHERE page_id = ?1 ORDER BY order_key",
+    )?;
+    let raw = stmt
+        .query_map([page_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, bool>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<RawBlock>>>()?;
+
+    let mut by_parent: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
+    for (index, row) in raw.iter().enumerate() {
+        by_parent.entry(row.1).or_default().push(index);
+    }
+
+    let mut out = Vec::with_capacity(raw.len());
+    push_rows(&raw, &by_parent, None, 0, include_collapsed, &mut out);
+    Ok(out)
+}
+
 fn push_rows(
     raw: &[RawBlock],
     by_parent: &HashMap<Option<i64>, Vec<usize>>,
     parent: Option<i64>,
     depth: u32,
+    include_collapsed: bool,
     out: &mut Vec<BlockRow>,
 ) {
     let Some(indices) = by_parent.get(&parent) else {
@@ -1946,8 +2919,8 @@ fn push_rows(
             collapsed: row.6,
             child_count,
         });
-        if !row.6 {
-            push_rows(raw, by_parent, Some(row.0), depth + 1, out);
+        if include_collapsed || !row.6 {
+            push_rows(raw, by_parent, Some(row.0), depth + 1, include_collapsed, out);
         }
     }
 }

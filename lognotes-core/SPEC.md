@@ -123,6 +123,7 @@ ever visible.
 | `set_favourite(page, bool)` | Stars or unstars a page. Outside the undo history. |
 | `record_visit(page)` | Records that a page was opened, by bumping a counter. Outside the undo history. |
 | `set_collapsed(block, bool)` | Persists fold state. Outside the undo history. |
+| `apply_consolidation(request)` | Writes one project digest (brief, timeline, last-consolidated date) and its agent tasks as a single composite action. Validates the target, dates, self-links, duplicates, task provenance, and text size before writing. Returns the through date, source days, counts, and block ids. |
 | `undo()` / `redo()` | Apply the recorded inverse (or replay it) and return whether anything happened. |
 
 Page creation is deliberately **outside** the history: undoing the first block of a day leaves an empty
@@ -141,6 +142,7 @@ mentions do not block. Journal days are never renamed or deleted.
 | --- | --- |
 | `page_by_name(name_key)` | Page row, or none. |
 | `page_blocks(page)` | Flattened rows: `id`, `depth`, `content`, `marker`, `scheduled_date`, `collapsed`, `child_count` — pre-order, honouring the order key. A collapsed block is included with its children omitted. |
+| `page_blocks_all(page)` | The same rows, including the descendants a folded block hides. Agent context must see the whole project record, not only what the view is showing. |
 | `pages()` | Every page, ordered by `name_key` — the page switcher's list. Written journal days are included, because a date is a name a block can link to; a day nobody wrote has no row, and scrolling the column is what reaches it. |
 | `references(page)` | `ReferenceRow`s: blocks that link this page (`ReferenceKind::Linked`, from `block_link`) followed by plain mentions (`Mention`, from `block_fts`, minus the blocks that already link, matched on whole words). Each row carries the block's own page name and journal date. |
 | `day(date)` | `JournalDay`: the day's blocks, or an empty block list with no page id when the day was never written. |
@@ -150,6 +152,7 @@ mentions do not block. Journal days are never renamed or deleted.
 | `setting(key)` / `set_setting(key, value)` | The app's own settings, `theme` today. A missing key is `None`, not an error. |
 | `search(query, page_limit, block_limit)` | `SearchResults`: pages and written days whose name contains the query — an exact name first, then a prefix, then anywhere, alphabetical within a rank — and blocks whose text matches it through `block_fts`, ranked by bm25. Each block hit carries its page's name or journal date, a window of its text around the match, and where inside that window the match sits; `total` counts every match, not only the capped ones. |
 | `page_of_block(block)` | The page a block belongs to — what the view needs to show a block a search found. |
+| `project_context(page, since?, full?)` | The named project page, its digest section and last-consolidated date, its human notes, the explicit journal source roots with their ancestor framing and subtrees, the agent's own tasks, and the human open tasks. The project page and any `[agent]` task subtree are excluded; plain mentions are not sources. `since` filters by journal day; `full` ignores it. `nothing_new` is true when the newest source is not later than the last-consolidated date. |
 | `journal_days_ending_at(date, count)` | `count` dates ending at `date`, newest first — the chunk the column loads. |
 | `agenda(today, horizon_days = 7)` | `AgendaRow`s: blocks with a marker in (`TODO`, `DOING`) and a `scheduled_date` up to `today + horizon`, **including past dates**, ordered by `scheduled_date` then page then order key. Each row carries the block, its owning page's name and journal date, and an `overdue` flag computed against `today` — so no caller has to compare dates itself. |
 | `references(page)` | Explicit references from `block_link`, plus plain mentions from `block_fts` matched on `name_key` as whole words and excluding blocks already listed. |
@@ -157,6 +160,55 @@ mentions do not block. Journal days are never renamed or deleted.
 The agenda rule and its unconfirmed parts are recorded in `lognotes`; this module implements them and
 does not redefine them. The same holds for the invariant that a flat, depth-carrying row list is the shape
 both `page_blocks` and `agenda` return — it is what lets one QML model render every view.
+
+## Project consolidation
+
+A project is a named page. Journal blocks that explicitly link it — `[[Project Alpha]]` or
+`#ProjectAlpha` — are its sources; a plain mention is not a source. The source is the whole root subtree:
+if a day says `Worked on [[Project Alpha]]` and the details are children, those children are part of the
+source. The ancestor chain is returned as framing. The project page itself is never a source, so its digest
+cannot feed on its own output.
+
+The page carries at most one top-level heading:
+
+```text
+## Agent digest (auto-generated)
+  Last consolidated: [[2026-11-22]]
+  ### Current state
+  ### Decisions
+  ### Open questions
+  ### Timeline
+```
+
+The heading's descendants are the agent-owned subtree. A consolidation replaces the brief sections, keeps
+and extends the timeline, and updates `Last consolidated`; every block outside that subtree is left
+byte-for-byte alone. A missing section is created at the top of the page; two are refused. A proposed digest
+that links its own page is refused.
+
+Timeline entries are one per journal day. The store formats an entry as
+`<date>: <text> [[<date>]]` and merges by date, so a re-run does not add a second entry. A brief item carries
+its source days; the store appends the missing `[[date]]` links and marks an item with no sources as
+`(unsourced)`.
+
+Agent tasks live in today's journal under at most one top-level root per project:
+
+```text
+- [agent] [[Project Alpha]] tasks
+    - TODO Review cache invalidation [[2026-11-20]]
+```
+
+The root begins with `[agent]` and links the project; the tasks are children marked `TODO`, with no
+scheduled date. A task always links its source journal day. Creation reuses the marked root, refuses a
+second matching root, and skips an exact normalized duplicate of an existing agent task across earlier days.
+Closing changes the marker of a block under an `[agent]` root only; it never rewrites text or touches a
+human task. Any journal root beginning with `[agent]` and its descendants are excluded from project
+context, so the agent cannot consume its own output. Removing the marker makes the block ordinary journal
+content again.
+
+The whole consolidation — digest, timeline, last-consolidated date, task creation, and task closure — is one
+composite undo action. Validation happens before the first write: named page only, ISO through date not in
+the future, dated timeline entries, sourced tasks, no self-link, one digest section, and a bounded payload.
+No schema change backs any of this; the digest and tasks are ordinary blocks.
 
 ## Derived link state
 
@@ -273,9 +325,11 @@ before anything is written.
 ## Errors
 
 One typed error enum — `NotFound`, `InvalidPosition` (no key fits between the neighbours), `BadOffset`
-(not on a character boundary), `BadDate`, `BadPageName`, `SchemaTooNew`, `Storage` (wrapped sqlite error),
-`Backup` (a copy or an export could not be written). No panic on any input the bridge can pass. Every variant carries enough context to name the offending page or block in a
-UI message.
+(not on a character boundary), `BadDate`, `BadPageName`, `BadRenameName`, `PageExists`, `PageNotFound`,
+`PageHasLinks`, `MoveIntoSelf`, `InvalidConsolidation` (a project write was refused before changing
+anything), `SchemaTooNew`, `Storage` (wrapped sqlite error), `Backup` (a copy or an export could not be
+written). No panic on any input the bridge can pass. Every variant carries enough context to name the
+offending page or block in a UI message.
 
 Dates are validated by round-trip, not by `parse` alone: chrono accepts `2026-4-3`, and a store that
 silently treats it as a second spelling of `2026-04-03` would hand out two keys for one day.
@@ -303,6 +357,13 @@ and scheduled dates surviving a reindex.
 Covered from this capability: a cross-page move carries the subtree's page ownership and one undo restores both; moving into a descendant is refused. Folding hides children, survives a
 reopened store, and is not an undo step. Renaming rewrites links and tags outside code as one step, and
 deleting refuses while a link remains and restores the page and its blocks on undo.
+
+Project consolidation has its own test file: explicit journal roots with children and ancestor framing;
+the project page, `[agent]` subtrees, and plain mentions excluded; the digest section's last date and human
+notes; a folded digest still read in full; malformed and duplicate sections; one consolidation writing the
+brief, timeline, last date, and today's task root; one undo restoring both pages; idempotent timeline and
+task writes; dedupe across earlier days; closing only agent-owned tasks; self-link, future-date, journal
+target, provenance, and no-op refusals; and the schema version staying at 3.
 
 Markdown is covered separately in `markdown`'s own tests: each syntax's spans and their dim marks, nested
 emphasis, an unclosed marker staying plain, `snake_case` not italicising, links and tags with their

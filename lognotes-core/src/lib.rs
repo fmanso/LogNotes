@@ -11,6 +11,7 @@ pub mod export;
 pub mod markdown;
 mod model;
 mod order;
+pub mod project;
 mod store;
 mod text;
 
@@ -21,4 +22,8 @@ pub use model::{
     Renamed, SearchResults,
 };
 pub use order::key_between;
+pub use project::{
+    BlockRef, Brief, BriefItem, ConsolidationRequest, ConsolidationResult, DigestInfo,
+    ProjectContext, ProjectSource, TaskRef, TaskToCreate, TaskUpdate, TimelineEntry,
+};
 pub use store::{Store, is_date_name};

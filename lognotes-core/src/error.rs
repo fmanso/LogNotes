@@ -46,6 +46,9 @@ pub enum Error {
     #[error("{0}")]
     BadDate(String),
 
+    #[error("could not consolidate the project: {0}")]
+    InvalidConsolidation(String),
+
     #[error(transparent)]
     Storage(#[from] rusqlite::Error),
 

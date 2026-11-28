@@ -15,6 +15,9 @@ lognotes-core = { path = "../lognotes-core" }
 # Draws ```mermaid fences to SVG on the worker thread. Default features off: the CLI and the PNG
 # rasteriser are not needed, the view renders the SVG itself.
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+# The local agent bridge: JSON over loopback, and a per-launch token.
+rand = "0.9"
+serde_json = "1"
 
 [build-dependencies]
 cxx-qt-build = "0.10"

@@ -73,6 +73,10 @@ application small enough to fully own and trim.
   import reads such a folder back in, so a graph can leave this app and come back.
 - **Local database.** All notes are stored locally in a database that is the single source of truth; the
   app works fully offline with no account.
+- **A memory for local agents.** While the app is running, a loopback-only MCP bridge lets a coding agent
+  read project context and write one project digest plus its tasks. The digest is a marked section on the
+  project page; tasks land in today's journal under an `[agent]` root. The app remains the only writer, and
+  one undo takes the whole consolidation back. No cloud service or account is involved.
 
 ## Out of scope (by decision)
 

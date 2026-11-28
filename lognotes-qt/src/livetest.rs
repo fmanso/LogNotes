@@ -4,11 +4,63 @@
 //! `main.qml` the app loads and drives it through the real input path, so what it exercises is what a
 //! person gets. Screenshots land in `$TMPDIR/lognotes-livetest/shots/`.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 use lognotes_core::{BlockRow, Marker, Store};
+use serde_json::{Value, json};
 
 use crate::driver::{self, key, modifier};
 use crate::MAIN_QML;
+
+/// Call the running app's local agent bridge, as the MCP adapter would.
+fn bridge_call(root: &std::path::Path, method: &str, params: Value) -> Result<Value, String> {
+    let control_path = root.join("lognotes-agent.json");
+    let text = std::fs::read_to_string(&control_path)
+        .map_err(|_| format!("no control file at {}", control_path.display()))?;
+    let control: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let port = control
+        .get("port")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "control file has no port".to_string())? as u16;
+    let token = control
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "control file has no token".to_string())?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    let body = json!({"method": method, "params": params}).to_string();
+    let request = format!(
+        "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(|error| error.to_string())?;
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "incomplete response".to_string())?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let body = String::from_utf8_lossy(&raw[split + 4..]).to_string();
+    if status == 200 {
+        serde_json::from_str(&body).map_err(|error| error.to_string())
+    } else {
+        let message = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| value.get("error").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or(body);
+        Err(message)
+    }
+}
 
 pub fn run() -> ! {
     let root = std::env::temp_dir().join("lognotes-livetest");
@@ -785,6 +837,32 @@ pub fn run() -> ! {
     );
     driver::click_named(&QString::from("renamePageMenuItem"), 0);
     driver::settle();
+    shot("29a-rename-dialog-light");
+    check(
+        "the rename dialog opens in the light theme",
+        driver::visible(&QString::from("renamePageField"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "light",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
+    driver::settle();
+    shot("29a-rename-dialog-dark");
+    check(
+        "the rename dialog follows the theme switch",
+        driver::visible(&QString::from("renamePageField"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
+    driver::settle();
+    driver::click_named(&QString::from("renamePageField"), 0);
+    driver::settle();
     driver::press_key(key::A, modifier::CTRL);
     driver::type_text(&QString::from("Renamed Project"));
     driver::press_key(key::RETURN, modifier::NONE);
@@ -903,6 +981,32 @@ pub fn run() -> ! {
     driver::click_block_at(move_row, 0.05);
     driver::settle();
     driver::press_key(key::M, modifier::CTRL | modifier::SHIFT);
+    driver::settle();
+    shot("29c-move-dialog-light");
+    check(
+        "the move dialog opens in the light theme",
+        driver::visible(&QString::from("movePageFilter"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "light",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
+    driver::settle();
+    shot("29c-move-dialog-dark");
+    check(
+        "the move dialog follows the theme switch",
+        driver::visible(&QString::from("movePageFilter"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
+    driver::settle();
+    driver::click_named(&QString::from("movePageFilter"), 0);
     driver::settle();
     driver::type_text(&QString::from("Target Page"));
     driver::press_key(key::RETURN, modifier::NONE);
@@ -1219,6 +1323,200 @@ pub fn run() -> ! {
         format!("theme={}", driver::journal_property(&QString::from("theme")).to_string()),
     );
     driver::click_named(&QString::from("themeButton"), 0);
+    driver::settle();
+
+    // The import-mode and export-confirmation dialogs normally follow a native file picker, which
+    // cannot be driven headlessly; open them through their own dialog objects to check their surface
+    // in both themes, then cancel without writing.
+    let opened_import = driver::open_named(&QString::from("importModeChooser"));
+    driver::settle();
+    shot("31c-import-dialog-light");
+    check(
+        "the import mode dialog opens in the light theme",
+        opened_import
+            && driver::visible(&QString::from("importMerge"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "light",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
+    driver::settle();
+    shot("31d-import-dialog-dark");
+    check(
+        "the import mode dialog follows the theme switch",
+        driver::visible(&QString::from("importMerge"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::click_named(&QString::from("importCancel"), 0);
+    driver::settle();
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
+    driver::settle();
+
+    let opened_export = driver::open_named(&QString::from("confirmReplace"));
+    driver::settle();
+    shot("31e-export-dialog-light");
+    check(
+        "the export confirmation opens in the light theme",
+        opened_export
+            && driver::visible(&QString::from("confirmExport"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "light",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
+    driver::settle();
+    shot("31f-export-dialog-dark");
+    check(
+        "the export confirmation follows the theme switch",
+        driver::visible(&QString::from("confirmExport"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::click_named(&QString::from("cancelExport"), 0);
+    driver::settle();
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
+    driver::settle();
+
+    // ---- the local agent bridge --------------------------------------------------------------
+    // Leave Settings, open a project with journal links, and exercise the same loopback endpoint
+    // the MCP adapter uses.
+    driver::close_settings();
+    driver::settle();
+    driver::call_journal(&QString::from("open_page"), &QString::from("My Project"));
+    wait_until(|| driver::named_text(&QString::from("pageHeading"), 0).to_string() == "My Project");
+    wait_until(|| root.join("lognotes-agent.json").exists());
+    shot("31g-agent-project");
+    let context = bridge_call(
+        &root,
+        "project_context",
+        json!({"page": "My Project", "full": true}),
+    )
+    .expect("the bridge answers project context");
+    let source_count = context["sources"].as_array().map(|items| items.len()).unwrap_or(0);
+    check(
+        "the agent bridge returns project context with journal sources",
+        source_count > 0
+            && context["digest"]["exists"] == false
+            && context["agent_tasks"].as_array().is_some_and(|items| items.is_empty()),
+        format!("context={context}"),
+    );
+
+    driver::set_agent_busy(true);
+    let busy = bridge_call(
+        &root,
+        "project_consolidation",
+        json!({"page": "My Project", "through": chrono::Local::now().format("%Y-%m-%d").to_string()}),
+    );
+    check(
+        "the agent bridge refuses a write while the editor is busy",
+        busy.as_ref()
+            .err()
+            .is_some_and(|error| error.contains("editor_busy")),
+        format!("answer={busy:?}"),
+    );
+    driver::set_agent_busy(false);
+
+    let source_day = context["sources"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|source| source["day"].as_str())
+        .expect("a source day")
+        .to_string();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let applied = bridge_call(
+        &root,
+        "project_consolidation",
+        json!({
+            "page": "My Project",
+            "through": today,
+            "brief": {
+                "current_state": [
+                    {"text": "The project has a linked journal record", "sources": [source_day]}
+                ],
+                "decisions": [],
+                "open_questions": []
+            },
+            "timeline_entries": [
+                {"date": source_day, "text": "Agent consolidation arrived"}
+            ],
+            "tasks_to_create": [
+                {"text": "Review the agent digest", "source_day": source_day}
+            ],
+            "task_updates": []
+        }),
+    )
+    .expect("the bridge applies a consolidation");
+    driver::settle();
+    check(
+        "the agent bridge applies a digest and a task",
+        applied["applied"] == true
+            && applied["tasks_created"] == 1
+            && applied["tasks_closed"] == 0,
+        format!("result={applied}"),
+    );
+
+    let after_apply = bridge_call(
+        &root,
+        "project_context",
+        json!({"page": "My Project", "full": true}),
+    )
+    .expect("the digest is readable");
+    let digest_blocks = after_apply["digest"]["blocks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    check(
+        "the digest, timeline, and marked task are readable through the bridge",
+        after_apply["digest"]["exists"] == true
+            && digest_blocks.iter().any(|block| block["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("The project has a linked journal record")))
+            && digest_blocks.iter().any(|block| block["content"]
+                .as_str()
+                .is_some_and(|text| text.starts_with(
+                    &format!("{source_day}: Agent consolidation arrived"))))
+            && after_apply["agent_tasks"].as_array().is_some_and(|tasks| {
+                tasks.iter().any(|task| task["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Review the agent digest")))
+            }),
+        format!("context={after_apply}"),
+    );
+    shot("31h-agent-digest");
+
+    driver::set_agent_busy(false);
+    driver::press_key(key::Z, modifier::CTRL);
+    driver::settle();
+    let after_undo = bridge_call(
+        &root,
+        "project_context",
+        json!({"page": "My Project", "full": true}),
+    )
+    .expect("the context is readable after undo");
+    check(
+        "one undo removes the digest and the agent task",
+        after_undo["digest"]["exists"] == false
+            && after_undo["agent_tasks"]
+                .as_array()
+                .is_some_and(|tasks| tasks.is_empty()),
+        format!("context={after_undo}"),
+    );
+    shot("31i-agent-undone");
+
+    driver::click_named(&QString::from("journalButton"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("settingsButton"), 0);
     driver::settle();
 
     // Import: a small Logseq folder, written by hand the way Logseq writes one.

@@ -65,6 +65,12 @@ mod ffi {
         fn lognotes_journal_ready() -> bool;
         #[rust_name = "call_journal"]
         fn lognotes_call_journal(method: &QString, argument: &QString) -> bool;
+        #[rust_name = "open_named"]
+        fn lognotes_open_named(name: &QString) -> bool;
+        #[rust_name = "set_agent_busy"]
+        fn lognotes_set_agent_busy(busy: bool) -> bool;
+        #[rust_name = "close_settings"]
+        fn lognotes_close_settings() -> bool;
     }
 }
 

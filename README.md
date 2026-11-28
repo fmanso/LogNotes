@@ -26,6 +26,10 @@ diagrams — and the block you are typing in stays plain text.
 - **A shell you can work from.** A sidebar of favourites and recently opened pages, a way back to the
   journal, and a light/dark theme that is remembered. Settings → About names the build version and platform.
 - **One local file.** Notes live in a single SQLite database; the app works fully offline, with no account.
+- **A memory for local agents.** While LogNotes is running, a loopback-only MCP bridge lets a coding agent
+  read project context and write one project digest plus its tasks. The digest is a clearly marked section
+  of the project page; tasks land in today's journal under an `[agent]` root. The app stays the only writer,
+  and one undo takes the whole consolidation back.
 - **Not locked in.** A daily backup beside the database (newest seven kept, plus "Back up now" and restore
   from any listed copy), and a Settings page that opens either folder in your file manager, exports the graph
   as the Markdown folder Logseq 0.x reads, and imports such a folder back in merge or replace mode.
@@ -35,32 +39,36 @@ diagrams — and the block you are typing in stays plain text.
 Built for one person's daily use, and honest about it: Linux is where it is developed and tested; Windows
 builds in CI. There is no sync, no plugin host, and no Markdown mirror — the database is canonical. Backup
 and export exist so that staying put is a choice rather than a trap; import covers Logseq 0.x folders, not
-Logseq 2's triple-store database (yet).
+Logseq 2's triple-store database (yet). The local agent bridge is an external companion, not a plugin
+host: it exists only while the app runs, and it writes through the app.
 
 ## Downloading a build
 
-[v0.1.0](https://github.com/fmanso/LogNotes/releases) — a Linux tarball (binary, `.desktop` entry, icon) and
-a Windows zip that carries its Qt libraries, with `SHA256SUMS.txt` beside them. Pushing a `v*` tag is what
+[v0.1.0](https://github.com/fmanso/LogNotes/releases) — a Linux tarball (both binaries, `.desktop` entry,
+icon) and a Windows zip that carries its Qt libraries and both executables, with `SHA256SUMS.txt` beside
+them. Pushing a `v*` tag is what
 publishes a release: CI builds both platforms and attaches them.
 
 ## Installing
 
-On Linux, unpack the tarball and install the four files it carries (the version in the names depends on
-the release):
+On Linux, unpack the tarball and install the files it carries (the version in the names depends on the
+release):
 
 ```bash
 tar -xzf lognotes-0.1.0-linux-x86_64.tar.gz
 install -Dm755 lognotes-0.1.0/lognotes-qt ~/.local/bin/lognotes-qt
+install -Dm755 lognotes-0.1.0/lognotes-mcp ~/.local/bin/lognotes-mcp
 install -Dm644 lognotes-0.1.0/lognotes.desktop ~/.local/share/applications/lognotes.desktop
 install -Dm644 lognotes-0.1.0/lognotes.svg ~/.local/share/icons/hicolor/scalable/apps/lognotes.svg
 install -Dm644 lognotes-0.1.0/README.md ~/.local/share/doc/lognotes/README.md
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```
 
-`~/.local/bin` has to be on `PATH` for the desktop entry's `lognotes-qt`. On Windows, unpack the zip and run
-`LogNotes.exe`; it is portable, so there is nothing to install. Windows may show a SmartScreen warning
-because the binary is unsigned. No AppImage, Flatpak, or Windows installer is built for this release; a
-one-click installer waits for a code-signing certificate, because an unsigned one adds no trust over the zip.
+`~/.local/bin` has to be on `PATH` for the desktop entry's `lognotes-qt` and the agent client's
+`lognotes-mcp`. On Windows, unpack the zip and run `LogNotes.exe`; it is portable, so there is nothing to
+install. Windows may show a SmartScreen warning because the binary is unsigned. No AppImage, Flatpak, or
+Windows installer is built for this release; a one-click installer waits for a code-signing certificate,
+because an unsigned one adds no trust over the zip.
 
 ## Running it
 
@@ -88,14 +96,52 @@ with its backups, on first launch). Deleting the file starts an empty graph; cop
 A `lognotes.log` sits beside it: the build version, platform, data path, and what startup did; it rotates at
 1 MiB and keeps three files.
 
+## Using it with an agent
+
+LogNotes can act as the durable, human-readable memory for a local coding agent. The app exposes a
+loopback-only bridge while it is running; `lognotes-mcp` is a thin MCP adapter over that bridge. The agent
+never opens the database, and the app remains the only writer.
+
+An opencode configuration looks like this (Claude Desktop uses the same `command` under `mcpServers`):
+
+```json
+{
+  "mcp": {
+    "lognotes": {
+      "type": "local",
+      "command": ["lognotes-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+The tools are `get_project_context`, `apply_project_consolidation`, `search_notes`, `get_page`, `get_day`,
+`get_agenda`, and `get_backlinks`. `apply_project_consolidation` is the only write tool: it replaces the
+`## Agent digest (auto-generated)` subtree of a named project page and adds or closes tasks under an
+`[agent] … tasks` root on today's journal. It is one undo step. The app must be running; if it is not, the
+tools say so.
+
+`get_project_context` reads the explicit journal blocks that link the project, with their children and
+ancestor framing, plus the project page's digest and human notes. Plain mentions and `[agent]` task
+subtrees are not sources. The app refuses a write while a block editor is active (`editor_busy`), so an
+agent cannot reset the model under unsaved text; click outside the block and retry. The whole consolidation
+is one undo step.
+
+No network endpoint is involved: the bridge is `127.0.0.1` with a per-launch token in
+`lognotes-agent.json` beside the database. The file is user-only, and the token is never logged.
+
 ## How it is built
 
-Two crates, and the edge between them is the rule:
+Three crates, and the edges between them are the rule:
 
 - **`lognotes-core`** — the model, the SQLite store, sibling ordering, link extraction, the markdown
-  scanner, the agenda query. Pure Rust, no Qt, testable with `cargo test` alone.
-- **`lognotes-qt`** — the cxx-qt bridge, the journal model the QML binds to, the QML itself, and the one
-  hand-written C++ shim that drives the window under the test-only `driver` feature.
+  scanner, the agenda query, and project consolidation. Pure Rust, no Qt, testable with `cargo test` alone.
+- **`lognotes-qt`** — the cxx-qt bridge, the journal model the QML binds to, the QML itself, the local agent
+  control server, and the one hand-written C++ shim that drives the window under the test-only `driver`
+  feature.
+- **`lognotes-mcp`** — the stdio MCP adapter. It speaks the agent's protocol, reads the app's control file,
+  and forwards requests over loopback. It never links Qt and never opens the database.
 
 The behavior contracts live in [`openspec/specs/`](openspec/specs/); the design rationale lives in
 [`goal-and-requirements.md`](goal-and-requirements.md), [`architecture.md`](architecture.md),

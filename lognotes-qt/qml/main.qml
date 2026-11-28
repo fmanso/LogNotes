@@ -254,6 +254,59 @@ ApplicationWindow {
         }
     }
 
+    // Every in-app dialog: the app's page surface and hairline border, a themed title, and a dimming
+    // overlay from the same palette. The control style's own dialog takes its panel and header from the
+    // system palette, which is not the app theme, and its stock chrome read as a different application.
+    component ThemedDialog: Dialog {
+        id: control
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        padding: 12
+
+        background: Rectangle {
+            color: theme.page
+            border.color: theme.border
+            radius: 8
+        }
+
+        header: Label {
+            visible: control.title !== ""
+            text: control.title
+            color: theme.text
+            font.pixelSize: 14
+            font.bold: true
+            topPadding: 8
+            bottomPadding: 0
+            leftPadding: 12
+            rightPadding: 12
+        }
+
+        Overlay.modal: Rectangle {
+            color: theme.scrim
+            opacity: 0.35
+        }
+    }
+
+    // A text field inside a dialog, drawn like the bar's search field: the page surface, a hairline
+    // border that takes the accent on focus, and the theme's text and placeholder colours.
+    component QuietField: TextField {
+        id: control
+        color: theme.text
+        placeholderTextColor: theme.textGhost
+        selectionColor: theme.accent
+        selectedTextColor: theme.page
+        leftPadding: 10
+        rightPadding: 10
+        topPadding: 7
+        bottomPadding: 7
+
+        background: Rectangle {
+            color: theme.page
+            border.color: control.activeFocus ? theme.accent : theme.border
+            radius: 6
+        }
+    }
+
     // If the store never answers, show the window anyway rather than leave nothing on screen.
     Timer {
         interval: 2000
@@ -2021,6 +2074,7 @@ ApplicationWindow {
                     // Restores the caret when the model rebuild hands focus back, and flushes a
                     // pending debounced save when the block is left.
                     onActiveFocusChanged: {
+                        journal.set_agent_busy(activeFocus)
                         if (activeFocus) {
                             root.editingRow = index
                             if (root.wantsFocus) {
@@ -2785,10 +2839,10 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ThemedDialog {
         id: importModeChooser
-        anchors.centerIn: Overlay.overlay
-        modal: true
+        objectName: "importModeChooser"
+        width: 424
         title: qsTr("How should this folder be imported?")
 
         contentItem: Label {
@@ -2846,10 +2900,8 @@ ApplicationWindow {
         id: movePageModel
     }
 
-    Dialog {
+    ThemedDialog {
         id: movePageDialog
-        anchors.centerIn: Overlay.overlay
-        modal: true
         title: qsTr("Move block to page")
 
         onOpened: {
@@ -2863,8 +2915,9 @@ ApplicationWindow {
             width: 420
             spacing: 8
 
-            TextField {
+            QuietField {
                 id: movePageFilter
+                objectName: "movePageFilter"
                 width: parent.width
                 placeholderText: qsTr("Filter pages…")
                 onTextChanged: {
@@ -2930,10 +2983,8 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ThemedDialog {
         id: renamePageDialog
-        anchors.centerIn: Overlay.overlay
-        modal: true
         title: qsTr("Rename page")
 
         function submit() {
@@ -2947,7 +2998,7 @@ ApplicationWindow {
             renamePageField.selectAll()
         }
 
-        contentItem: TextField {
+        contentItem: QuietField {
             id: renamePageField
             objectName: "renamePageField"
             width: 380
@@ -2974,10 +3025,10 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ThemedDialog {
         id: deletePageDialog
-        anchors.centerIn: Overlay.overlay
-        modal: true
+        objectName: "deletePageDialog"
+        width: 424
         title: qsTr("Delete page?")
 
         contentItem: Label {
@@ -3014,10 +3065,10 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ThemedDialog {
         id: confirmRestore
-        anchors.centerIn: Overlay.overlay
-        modal: true
+        objectName: "confirmRestore"
+        width: 404
         title: qsTr("Restore this backup?")
 
         contentItem: Label {
@@ -3050,10 +3101,10 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    ThemedDialog {
         id: confirmReplace
-        anchors.centerIn: Overlay.overlay
-        modal: true
+        objectName: "confirmReplace"
+        width: 384
         title: qsTr("Replace notes in that folder?")
 
         contentItem: Label {

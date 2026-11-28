@@ -42,6 +42,11 @@ QML never sees SQL, rusqlite types, or a database handle: it binds to models the
 commands on them. Core never sees QML. Anything the UI needs computed is a named query in core, not a
 filter written in QML.
 
+An optional `lognotes-mcp` binary translates an agent's MCP over stdio into loopback requests to the
+running app. It never opens the database: the app writes, the worker reindexes links, and one undo takes
+back a whole project consolidation. The bridge is local-only and token-authenticated, and the app must be
+running for it to answer.
+
 ## Decisions
 
 **Pages and blocks stay two kinds of thing.** One `page` row owns an ordered tree of `block` rows; a block
@@ -119,6 +124,18 @@ with indentation instead of recursing.
 blocks, then the scheduled section, then linked references. Core supplies the scheduled blocks — a query,
 not a view concern — so the same list can later appear elsewhere without reimplementing the rule.
 
+**A project digest is ordinary blocks, inside a visible contract.** The agent-owned section on a project
+page is a normal heading and normal blocks, not a second store. That keeps export/import, undo, links, and
+folding working without special cases. The visible contract is the boundary: the heading names the
+agent-owned subtree, the tasks live under an `[agent]` root on today's journal, and the context query
+excludes both the project page and those task roots. No block metadata and no schema change are needed for
+v1.
+
+**An agent is a client of the app, never a second writer.** The local MCP adapter reads the graph through
+the same context query and writes through the same worker and store as the UI. Direct database access would
+bypass link reindexing, undo, and the single-writer lock, so it is deliberately absent. The bridge is
+loopback-only, token-authenticated, and refuses writes while an editor has unsaved focus.
+
 ## Invariants
 
 - A block has exactly one owning page; nesting is a tree within that page and never crosses pages. A move
@@ -172,4 +189,5 @@ requirement: Qt's SVG image plugin, without which a drawn diagram silently rende
 The following are absent by decision, not yet to be built: sync between devices, plugin hosting, and the
 2.x features the maker does not use (queries, properties, graph view, whiteboards, flashcards). The
 Markdown bridge (`export_markdown` / `import_markdown`) exists so the canonical database is not a trap:
-the graph can leave as Logseq 0.x folders and come back.
+the graph can leave as Logseq 0.x folders and come back. The local MCP adapter is not a plugin host either:
+it is a separate local client, it exists only while the app runs, and it writes through the app.

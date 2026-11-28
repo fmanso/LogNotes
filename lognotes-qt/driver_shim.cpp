@@ -460,6 +460,32 @@ bool lognotes_call_journal(const QString& method, const QString& argument) {
                                      Q_ARG(QString, argument));
 }
 
+bool lognotes_set_agent_busy(bool busy) {
+    auto* model = journal_model();
+    if (!model) {
+        return false;
+    }
+    return QMetaObject::invokeMethod(model, "set_agent_busy", Q_ARG(bool, busy));
+}
+
+bool lognotes_close_settings() {
+    if (!g_root) {
+        return false;
+    }
+    return QMetaObject::invokeMethod(g_root, "closeSettings");
+}
+
+bool lognotes_open_named(const QString& name) {
+    if (!g_root) {
+        return false;
+    }
+    const auto matches = g_root->findChildren<QObject*>(name);
+    if (matches.isEmpty()) {
+        return false;
+    }
+    return QMetaObject::invokeMethod(matches.first(), "open");
+}
+
 int lognotes_row_count() {
     auto* model = journal_model();
     return model ? model->rowCount() : -1;

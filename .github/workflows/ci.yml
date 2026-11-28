@@ -78,7 +78,7 @@ jobs:
         run: cargo test --workspace --release --jobs 2
 
       - name: Build
-        run: cargo build --release -p lognotes-qt --jobs 2
+        run: cargo build --release -p lognotes-qt -p lognotes-mcp --jobs 2
 
       - name: Package
         shell: pwsh

@@ -12,6 +12,7 @@ Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 Copy-Item target/release/lognotes-qt.exe "$stage/LogNotes.exe"
+Copy-Item target/release/lognotes-mcp.exe "$stage/lognotes-mcp.exe"
 Copy-Item packaging/lognotes.svg, README.md, LICENSE $stage/
 
 # Everything the executable loads at runtime: Qt DLLs, the QML modules, the platform and image plugins.
