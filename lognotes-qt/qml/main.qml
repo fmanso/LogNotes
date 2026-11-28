@@ -153,18 +153,25 @@ ApplicationWindow {
     function fillFonts() {
         fontModel.clear()
         const query = fontFilter.text.toLowerCase()
-        if (query === "" || "default".indexOf(query) >= 0) {
-            fontModel.append({ name: "" })
+        const appFont = Qt.application.font.family
+        if (query === "" || "default".indexOf(query) >= 0
+                || appFont.toLowerCase().indexOf(query) >= 0) {
+            fontModel.append({ name: "", label: qsTr("Default"), detail: appFont })
         }
         for (let index = 0; index < root.fontFamilies.length; index++) {
             const family = root.fontFamilies[index]
             if (query === "" || family.toLowerCase().indexOf(query) >= 0) {
-                fontModel.append({ name: family })
+                fontModel.append({ name: family, label: family, detail: "" })
             }
         }
-        const first = fontModel.count > 0 ? 0 : -1
-        fontList.currentIndex = first
-        fontDialog.previewFamily = first >= 0 ? fontModel.get(first).name : ""
+        fontList.currentIndex = fontModel.count > 0 ? 0 : -1
+        if (fontList.currentIndex >= 0) {
+            fontDialog.selectedFamily = fontModel.get(fontList.currentIndex).name
+            fontDialog.previewFamily = fontDialog.selectedFamily
+        } else {
+            fontDialog.selectedFamily = ""
+            fontDialog.previewFamily = ""
+        }
     }
 
     function fontIndex(name) {
@@ -174,8 +181,8 @@ ApplicationWindow {
         return -1
     }
 
-    function pickFont(name) {
-        journal.apply_font_family(name)
+    function applyFont() {
+        journal.apply_font_family(fontDialog.selectedFamily)
         fontDialog.close()
     }
 
@@ -285,6 +292,7 @@ ApplicationWindow {
     // control style's default dark chrome (which read as a different application on a cream page).
     component QuietButton: Button {
         id: control
+        opacity: enabled ? 1 : 0.45
         background: Rectangle {
             color: control.hovered ? theme.hover : "transparent"
             border.color: theme.border
@@ -2678,7 +2686,7 @@ ApplicationWindow {
 
                         Label {
                             objectName: "noteFontLabel"
-                            width: parent.width - 140
+                            width: parent.width - fontChangeButton.width - 12
                             text: journal.font_family === ""
                                   ? qsTr("Note font: Default")
                                   : (root.fontInstalled(journal.font_family)
@@ -2690,8 +2698,13 @@ ApplicationWindow {
                         }
 
                         QuietButton {
+                            id: fontChangeButton
                             objectName: "chooseFont"
                             text: qsTr("Change…")
+                            leftPadding: 14
+                            rightPadding: 14
+                            topPadding: 7
+                            bottomPadding: 7
                             onClicked: fontDialog.open()
                         }
                     }
@@ -3092,8 +3105,9 @@ ApplicationWindow {
     ThemedDialog {
         id: fontDialog
         objectName: "fontDialog"
-        width: 460
+        width: 560
         title: qsTr("Note font")
+        property string selectedFamily: ""
         property string previewFamily: ""
 
         onOpened: {
@@ -3101,24 +3115,33 @@ ApplicationWindow {
             root.fillFonts()
             const current = root.fontIndex(journal.font_family)
             fontList.currentIndex = current >= 0 ? current : 0
+            fontDialog.selectedFamily = fontList.currentIndex >= 0
+                                        ? fontModel.get(fontList.currentIndex).name : ""
+            fontDialog.previewFamily = fontDialog.selectedFamily
             fontFilter.forceActiveFocus()
         }
 
         contentItem: Column {
-            width: 420
-            spacing: 8
+            width: 536
+            spacing: 12
+
+            Label {
+                width: parent.width
+                text: qsTr("Used for the notes only. The rest of the window keeps the app font.")
+                color: theme.textMuted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
 
             QuietField {
                 id: fontFilter
                 objectName: "fontFilter"
                 width: parent.width
-                placeholderText: qsTr("Filter fonts…")
+                placeholderText: qsTr("Search installed fonts…")
                 onTextChanged: root.fillFonts()
                 onAccepted: {
-                    if (fontModel.count > 0) {
-                        const name = fontModel.get(fontList.currentIndex < 0
-                                                    ? 0 : fontList.currentIndex).name
-                        root.pickFont(name)
+                    if (fontList.currentIndex >= 0) {
+                        root.applyFont()
                     }
                 }
                 Keys.onDownPressed: {
@@ -3134,65 +3157,185 @@ ApplicationWindow {
                 }
             }
 
-            Label {
-                objectName: "fontPreview"
+            Rectangle {
                 width: parent.width
-                text: qsTr("The quick brown fox jumps over the lazy dog.")
-                color: theme.text
-                font.family: fontDialog.previewFamily
-                font.pixelSize: 16
-                elide: Text.ElideRight
-            }
+                height: 104
+                color: theme.panel
+                border.color: theme.rule
+                radius: 8
 
-            ListView {
-                id: fontList
-                objectName: "fontList"
-                width: parent.width
-                height: 260
-                clip: true
-                model: fontModel
-                onCurrentIndexChanged: {
-                    if (fontList.currentIndex >= 0 && fontModel.count > 0) {
-                        fontDialog.previewFamily = fontModel.get(fontList.currentIndex).name
-                    }
-                }
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 6
 
-                delegate: Item {
-                    width: fontList.width
-                    height: 30
-
-                    Rectangle {
-                        anchors.fill: parent
-                        color: ListView.isCurrentItem ? theme.hover : "transparent"
+                    Label {
+                        text: qsTr("PREVIEW")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
                     }
 
                     Label {
-                        objectName: "fontFamilyItem"
-                        anchors.left: parent.left
-                        anchors.leftMargin: 10
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: model.name === "" ? qsTr("Default") : model.name
+                        objectName: "fontPreview"
+                        width: parent.width
+                        text: qsTr("The quick brown fox jumps over the lazy dog.")
                         color: theme.text
-                        font.pixelSize: 13
+                        font.family: fontDialog.previewFamily
+                        font.pixelSize: 18
                         elide: Text.ElideRight
                     }
 
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: root.pickFont(model.name)
+                    Label {
+                        width: parent.width
+                        text: fontDialog.selectedFamily === ""
+                              ? qsTr("Default (%1)").arg(Qt.application.font.family)
+                              : fontDialog.selectedFamily
+                        color: theme.textFaint
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
                     }
                 }
             }
-        }
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
+            Rectangle {
+                width: parent.width
+                height: Math.min(300, Math.max(120, Overlay.overlay.height - 340))
+                color: theme.page
+                border.color: theme.rule
+                radius: 8
+                clip: true
 
-            QuietButton {
-                objectName: "cancelFont"
-                text: qsTr("Cancel")
-                onClicked: fontDialog.close()
+                ListView {
+                    id: fontList
+                    objectName: "fontList"
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    clip: true
+                    model: fontModel
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    onCurrentIndexChanged: {
+                        if (currentIndex >= 0 && fontModel.count > 0) {
+                            fontDialog.selectedFamily = fontModel.get(currentIndex).name
+                            fontDialog.previewFamily = fontDialog.selectedFamily
+                        }
+                    }
+
+                    delegate: Item {
+                        width: fontList.width
+                        height: model.detail === "" ? 34 : 42
+                        property bool hovered: false
+
+                        HoverHandler {
+                            onHoveredChanged: parent.hovered = hovered
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: fontDialog.selectedFamily === model.name || parent.hovered
+                                   ? theme.hover : "transparent"
+                            radius: 6
+                        }
+
+                        Rectangle {
+                            width: 2
+                            height: parent.height - 12
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            radius: 1
+                            color: fontDialog.selectedFamily === model.name
+                                   ? theme.accent : "transparent"
+                        }
+
+                        Column {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 14
+                            anchors.right: parent.right
+                            anchors.rightMargin: 10
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 1
+
+                            Label {
+                                objectName: "fontFamilyItem"
+                                width: parent.width
+                                text: model.label
+                                color: theme.text
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                            }
+
+                            Label {
+                                width: parent.width
+                                visible: model.detail !== ""
+                                text: model.detail
+                                color: theme.textFaint
+                                font.pixelSize: 10
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: fontList.currentIndex = index
+                        }
+                    }
+                }
+
+                Label {
+                    anchors.centerIn: parent
+                    visible: fontModel.count === 0
+                    text: qsTr("No fonts match.")
+                    color: theme.textFaint
+                    font.pixelSize: 12
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
+            Item {
+                width: parent.width
+                height: 40
+
+                Label {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Enter applies. Esc cancels.")
+                    color: theme.textGhost
+                    font.pixelSize: 11
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "cancelFont"
+                        text: qsTr("Cancel")
+                        leftPadding: 16
+                        rightPadding: 16
+                        topPadding: 8
+                        bottomPadding: 8
+                        onClicked: fontDialog.close()
+                    }
+
+                    QuietButton {
+                        objectName: "applyFont"
+                        text: qsTr("Apply")
+                        enabled: fontList.currentIndex >= 0
+                        leftPadding: 16
+                        rightPadding: 16
+                        topPadding: 8
+                        bottomPadding: 8
+                        onClicked: root.applyFont()
+                    }
+                }
             }
         }
     }

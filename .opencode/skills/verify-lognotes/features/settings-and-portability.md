@@ -40,7 +40,9 @@ Preconditions:
   livetest temp directory.
 - **Note font.** Read `PASS the font picker opens with the filter focused`,
   `PASS typing in the font filter lists matches`, and
-  `PASS choosing a font sets the notes and is remembered`. Shots `30a-font-dialog-light` and
+  `PASS selecting a font previews it without applying`. Shot `30a-font-selected` shows the
+  highlighted family in the preview card.
+  Read `PASS applying a font sets the notes and is remembered`. Shots `30a-font-dialog-light` and
   `30c-font-applied`; the detail must repeat the chosen family in `picked=`, `note=`, and `stored=`,
   and say `rendered=true` for the rendered note text.
   Read `PASS the Default entry restores the app font`.

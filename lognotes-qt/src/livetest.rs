@@ -1304,6 +1304,20 @@ pub fn run() -> ! {
 
     driver::click_named(&QString::from("fontFamilyItem"), 0);
     driver::settle();
+    shot("30a-font-selected");
+    check(
+        "selecting a font previews it without applying",
+        driver::journal_property(&QString::from("font_family"))
+            .to_string()
+            .is_empty()
+            && driver::visible(&QString::from("fontFilter")),
+        format!(
+            "stored={:?}",
+            driver::journal_property(&QString::from("font_family")).to_string()
+        ),
+    );
+    driver::click_named(&QString::from("applyFont"), 0);
+    driver::settle();
     let stored = Store::open(&root.join("lognotes.db"))
         .expect("the store")
         .setting("font_family")
@@ -1315,7 +1329,7 @@ pub fn run() -> ! {
     };
     wait_until(rendered_shows);
     check(
-        "choosing a font sets the notes and is remembered",
+        "applying a font sets the notes and is remembered",
         picked != default_font
             && driver::journal_property(&QString::from("font_family")).to_string() == picked
             && driver::note_font().to_string() == picked
@@ -1337,6 +1351,8 @@ pub fn run() -> ! {
     driver::click_named(&QString::from("chooseFont"), 0);
     driver::settle();
     driver::click_named(&QString::from("fontFamilyItem"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("applyFont"), 0);
     driver::settle();
     check(
         "the Default entry restores the app font",
@@ -1381,6 +1397,8 @@ pub fn run() -> ! {
     driver::click_named(&QString::from("chooseFont"), 0);
     driver::settle();
     driver::click_named(&QString::from("fontFamilyItem"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("applyFont"), 0);
     driver::settle();
     check(
         "picking Default clears an unavailable font",
