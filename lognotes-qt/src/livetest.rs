@@ -140,6 +140,7 @@ pub fn run() -> ! {
         blocks(&root) == ["hello world", ""],
         format!("blocks={:?}", blocks(&root)),
     );
+    wait_until(|| driver::focus_name().to_string() == "blockEditor");
     check(
         "the caret followed into the new block",
         driver::focus_name().to_string() == "blockEditor",
@@ -668,9 +669,11 @@ pub fn run() -> ! {
     driver::wait_ms(150);
     driver::type_text(&QString::from("this is not a diagram"));
     driver::settle();
-    shot("23-diagram-error");
 
-    let error = driver::named_text(&QString::from("diagramError"), 0).to_string();
+    let error = || driver::named_text(&QString::from("diagramError"), 0).to_string();
+    wait_until(|| error().starts_with("diagram error: "));
+    let error = error();
+    shot("23-diagram-error");
     check(
         "a fence that does not parse says so in one quiet line",
         error.starts_with("diagram error: ") && !error.contains('\n'),
