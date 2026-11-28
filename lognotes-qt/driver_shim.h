@@ -53,6 +53,9 @@ bool lognotes_click_named(const QString& name, int index);
 // or an empty string. How a rendered summary row and a drawn diagram are checked.
 QString lognotes_named_text(const QString& name, int index);
 
+// Font family of the first block row's editor — proves the note font reached the notes themselves.
+QString lognotes_note_font();
+
 // Clicks a link inside the index-th block row at rest, found with the view's own hit test. False when
 // that row is being edited or holds no link.
 bool lognotes_click_link(int index);

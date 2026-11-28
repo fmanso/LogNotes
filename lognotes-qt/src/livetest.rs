@@ -1266,6 +1266,131 @@ pub fn run() -> ! {
         driver::journal_property(&QString::from("can_restore")).to_string(),
     );
 
+    // ---- the note font: the picker, the theme it follows, and a family from another machine ------
+    let default_font = driver::note_font().to_string();
+    driver::click_named(&QString::from("chooseFont"), 0);
+    driver::settle();
+    shot("30a-font-dialog-light");
+    check(
+        "the font picker opens with the filter focused",
+        driver::visible(&QString::from("fontFilter"))
+            && driver::focus_name().to_string() == "fontFilter",
+        format!("focus={}", driver::focus_name().to_string()),
+    );
+
+    driver::type_text(&QString::from("mono"));
+    driver::settle();
+    let picked = driver::named_text(&QString::from("fontFamilyItem"), 0).to_string();
+    check(
+        "typing in the font filter lists matches",
+        !picked.is_empty() && picked.to_lowercase().contains("mono"),
+        format!("first={picked:?}"),
+    );
+
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
+    driver::settle();
+    shot("30b-font-dialog-dark");
+    check(
+        "the font picker follows the theme switch",
+        driver::visible(&QString::from("fontFilter"))
+            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
+        format!(
+            "theme={}",
+            driver::journal_property(&QString::from("theme")).to_string()
+        ),
+    );
+    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
+    driver::settle();
+
+    driver::click_named(&QString::from("fontFamilyItem"), 0);
+    driver::settle();
+    let stored = Store::open(&root.join("lognotes.db"))
+        .expect("the store")
+        .setting("font_family")
+        .expect("read the font setting");
+    let rendered_shows = || {
+        driver::row_html(0)
+            .to_string()
+            .contains(&format!("font-family:'{picked}'"))
+    };
+    wait_until(rendered_shows);
+    check(
+        "choosing a font sets the notes and is remembered",
+        picked != default_font
+            && driver::journal_property(&QString::from("font_family")).to_string() == picked
+            && driver::note_font().to_string() == picked
+            && stored.as_deref() == Some(picked.as_str())
+            && rendered_shows(),
+        format!(
+            "picked={picked:?} default={default_font:?} note={:?} stored={stored:?} rendered={}",
+            driver::note_font().to_string(),
+            rendered_shows()
+        ),
+    );
+
+    driver::close_settings();
+    driver::settle();
+    shot("30c-font-applied");
+    driver::click_named(&QString::from("settingsButton"), 0);
+    driver::settle();
+
+    driver::click_named(&QString::from("chooseFont"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("fontFamilyItem"), 0);
+    driver::settle();
+    check(
+        "the Default entry restores the app font",
+        driver::journal_property(&QString::from("font_family"))
+            .to_string()
+            .is_empty()
+            && driver::note_font().to_string() == default_font,
+        format!(
+            "note={:?} default={default_font:?}",
+            driver::note_font().to_string()
+        ),
+    );
+
+    // A family stored on another machine is kept, but the notes use the app font rather than an
+    // arbitrary substitute.
+    driver::call_journal(
+        &QString::from("apply_font_family"),
+        &QString::from("No Such Font 12345"),
+    );
+    driver::settle();
+    let missing_row = driver::named_text(&QString::from("noteFontLabel"), 0).to_string();
+    let missing_stored = Store::open(&root.join("lognotes.db"))
+        .expect("the store")
+        .setting("font_family")
+        .expect("read the font setting");
+    check(
+        "an unavailable font falls back to the app font",
+        driver::note_font().to_string() == default_font
+            && missing_stored.as_deref() == Some("No Such Font 12345"),
+        format!(
+            "note={:?} default={default_font:?} stored={missing_stored:?}",
+            driver::note_font().to_string()
+        ),
+    );
+    check(
+        "the settings row says the font is not installed",
+        missing_row.ends_with("(not installed)"),
+        missing_row.clone(),
+    );
+    shot("30d-font-missing");
+
+    driver::click_named(&QString::from("chooseFont"), 0);
+    driver::settle();
+    driver::click_named(&QString::from("fontFamilyItem"), 0);
+    driver::settle();
+    check(
+        "picking Default clears an unavailable font",
+        driver::journal_property(&QString::from("font_family"))
+            .to_string()
+            .is_empty()
+            && driver::note_font().to_string() == default_font,
+        format!("note={:?}", driver::note_font().to_string()),
+    );
+
     // The day's copy was written as the store opened; "Back up now" adds one beside it.
     let count_backups = || {
         driver::journal_property(&QString::from("backups"))

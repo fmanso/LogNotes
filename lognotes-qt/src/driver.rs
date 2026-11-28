@@ -41,6 +41,8 @@ mod ffi {
         fn lognotes_click_named(name: &QString, index: i32) -> bool;
         #[rust_name = "named_text"]
         fn lognotes_named_text(name: &QString, index: i32) -> QString;
+        #[rust_name = "note_font"]
+        fn lognotes_note_font() -> QString;
         #[rust_name = "click_link"]
         fn lognotes_click_link(index: i32) -> bool;
         #[rust_name = "visible"]

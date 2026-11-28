@@ -24,7 +24,8 @@ diagrams — and the block you are typing in stays plain text.
 - **Search.** `Ctrl+K` puts the caret in the bar; typing searches page names and block text, `Ctrl+Enter`
   opens every match in a full results view.
 - **A shell you can work from.** A sidebar of favourites and recently opened pages, a way back to the
-  journal, and a light/dark theme that is remembered. Settings → About names the build version and platform.
+  journal, and a light/dark theme and note font that are both remembered. Settings → About names the
+  build version and platform.
 - **One local file.** Notes live in a single SQLite database; the app works fully offline, with no account.
 - **A memory for local agents.** While LogNotes is running, a loopback-only MCP bridge lets a coding agent
   read project context and write one project digest plus its tasks. The digest is a clearly marked section

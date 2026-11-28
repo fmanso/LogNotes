@@ -58,9 +58,9 @@ Roles are `kind`, `text`, `depth`, `date`, `blockId`, `placeholder`, `marker`, `
 the row is a `page-header`; either way it stays ISO `YYYY-MM-DD` in the model and is formatted in QML — the
 core never learns a locale, and the view never parses a date.
 
-Three more properties belong to the shell rather than to a row: `theme` ("light" or "dark", from the
-store's settings), `sidebar` (the two lists as `{"favourites": […], "recent": […]}`), and
-`page_favourite` (whether the page in view is starred).
+Four more properties belong to the shell rather than to a row: `theme` ("light" or "dark", from the
+store's settings), `font_family` (the note font's family, empty for the app default), `sidebar` (the two
+lists as `{"favourites": […], "recent": […]}`), and `page_favourite` (whether the page in view is starred).
 
 Two more belong to the quick switcher: `hits` is the last search answer as
 `{"error": "…", "hits": […]}` (its own change signal is what rebuilds the list, so no counter is needed),
@@ -363,6 +363,13 @@ a `file://` URL to hand to the system file manager), the backups there are with 
 one is for, "Back up now", restore, and Import/Export. An **ABOUT** section at the bottom names the build
 (`LogNotes <version>` from `CARGO_PKG_VERSION`), the platform from `Qt.platform.os`, a one-line description
 and the MIT licence. The version is read from the build; QML never hardcodes a number.
+
+An **APPEARANCE** section at the top holds the note font: a row naming the current family ("Note font:
+Default") and a `Change…` button that opens a filterable picker with a live preview. The family is stored
+as `font_family` and applies to the note text only — the editor, rendered blocks, day headings, agenda and
+reference rows — while the window's chrome keeps the app font. A family that came from another machine is
+kept in the store but not used until it is installed: the notes fall back to the app font and the row says
+`(not installed)`.
 
 Each backup row has a **Restore** button. Restoring asks first, then saves the current database as
 `pre-restore-<timestamp>.db`, stages the chosen file under `<db>.restoring`, opens it once to prove it is a

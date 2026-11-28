@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QList>
 #include <QEventLoop>
+#include <QFont>
 #include <QGuiApplication>
 #include <QImage>
 #include <QInputMethodEvent>
@@ -322,6 +323,15 @@ QString lognotes_named_text(const QString& name, int index) {
         return text.toString();
     }
     return item->property("source").toString();
+}
+
+QString lognotes_note_font() {
+    const auto rows = block_rows();
+    if (rows.isEmpty()) {
+        return {};
+    }
+    auto* editor = editor_of(rows.first());
+    return editor ? editor->property("font").value<QFont>().family() : QString();
 }
 
 bool lognotes_click_link(int index) {

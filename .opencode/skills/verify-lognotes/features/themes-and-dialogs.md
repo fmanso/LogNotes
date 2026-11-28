@@ -11,6 +11,7 @@ re-themes while open.
 - `theme-dialog-move` opens the move-to-page dialog in the current theme and follows a switch.
 - `theme-dialog-import` opens the import mode dialog in the current theme and follows a switch.
 - `theme-dialog-export` opens the export confirmation in the current theme and follows a switch.
+- `theme-dialog-font` opens the note font picker in the current theme and follows a switch.
 - `theme-settings` keeps the settings page legible across a switch.
 
 ## How to get to it (user POV)
@@ -38,6 +39,8 @@ Preconditions:
   `29c-move-dialog-dark`.
 - **Settings.** Read `PASS the settings page survives the theme switch: theme=dark`. Shot
   `31b-settings-dark`.
+- **Font picker.** Read `PASS the font picker follows the theme switch: theme=dark`. Shots
+  `30a-font-dialog-light`, `30b-font-dialog-dark`. The dialog must stay open across the switch.
 - **Import dialog.** Read `PASS the import mode dialog opens in the light theme` and
   `PASS the import mode dialog follows the theme switch`. Shots `31c-import-dialog-light`,
   `31d-import-dialog-dark`.

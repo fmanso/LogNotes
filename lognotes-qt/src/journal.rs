@@ -151,6 +151,8 @@ pub mod qobject {
         #[qproperty(u64, revision)]
         #[qproperty(QString, hits)]
         #[qproperty(QString, theme)]
+        /// The note font's family, from the store's settings; empty means the app default.
+        #[qproperty(QString, font_family)]
         #[qproperty(QString, view)]
         #[qproperty(i32, loaded_days)]
         #[qproperty(QString, sidebar)]
@@ -358,6 +360,10 @@ pub mod qobject {
         #[qinvokable]
         fn apply_theme(self: Pin<&mut Self>, name: &QString);
 
+        /// Choose the family the notes are set in, and remember it; empty restores the app default.
+        #[qinvokable]
+        fn apply_font_family(self: Pin<&mut Self>, name: &QString);
+
         /// Show every match for `query`, in the column area — what the preview's "all results" row
         /// opens.
         #[qinvokable]
@@ -471,6 +477,8 @@ pub struct JournalRust {
     hits: QString,
     /// "light" or "dark", from the store's settings.
     theme: QString,
+    /// The note font's family, from the store's settings; empty means the app default.
+    font_family: QString,
     /// Which view the rows describe: "journal", "page" or "search".
     view: QString,
     /// How many journal days are materialised in the column, empty ones included.
@@ -525,6 +533,7 @@ enum Command {
     /// name came from a link or the sidebar.
     OpenPage { name: String },
     SetTheme { name: String },
+    SetFontFamily { name: String },
     SetFavourite { name: String, favourite: bool },
     Indent { block_id: i32 },
     Outdent { block_id: i32 },
@@ -644,6 +653,8 @@ struct Outcome {
     sidebar: String,
     /// "light" or "dark", from the store's settings.
     theme: String,
+    /// The note font's family, from the store's settings; empty means the app default.
+    font_family: String,
     /// Which view these rows describe: "journal", "page" or "search".
     view: &'static str,
     /// The rows of the results view, which are built where the query is answered.
@@ -1242,6 +1253,25 @@ impl qobject::Journal {
         });
     }
 
+    fn apply_font_family(mut self: Pin<&mut Self>, name: &QString) {
+        let name = name.to_string().trim().to_string();
+        // Show it at once; the write only has to reach the store before the next launch.
+        self.as_mut().set_font_family(QString::from(name.as_str()));
+
+        let dates = self.dates.clone();
+        if dates.is_empty() || self.worker.is_none() {
+            return;
+        }
+        let queue = self.as_mut().qt_thread();
+        let mode = self.mode.clone();
+        self.send(Job::Run {
+            command: Some(Command::SetFontFamily { name }),
+            dates,
+            mode,
+            queue,
+        });
+    }
+
     fn toggle_favourite(mut self: Pin<&mut Self>, name: &QString, favourite: bool) {
         let name = name.to_string();
         if name.trim().is_empty() {
@@ -1355,6 +1385,8 @@ impl qobject::Journal {
                 self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
                 self.as_mut().set_loaded_days(outcome.days.len() as i32);
                 self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+                self.as_mut()
+                    .set_font_family(QString::from(outcome.font_family.as_str()));
                 self.as_mut().set_view(QString::from(outcome.view));
                 self.as_mut().set_page_favourite(outcome.page_favourite);
                 self.as_mut().set_page_linked(
@@ -1400,6 +1432,8 @@ impl qobject::Journal {
         self.as_mut().set_sidebar(QString::from(outcome.sidebar.as_str()));
         self.as_mut().set_loaded_days(outcome.days.len() as i32);
         self.as_mut().set_theme(QString::from(outcome.theme.as_str()));
+        self.as_mut()
+            .set_font_family(QString::from(outcome.font_family.as_str()));
         self.as_mut().set_view(QString::from(outcome.view));
         self.as_mut().set_page_favourite(outcome.page_favourite);
         self.as_mut().set_page_linked(0);
@@ -1519,6 +1553,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                                 page: None,
                                 sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
                                 theme: "light".to_string(),
+                                font_family: String::new(),
                                 view: "journal",
                                 search_rows: Vec::new(),
                                 page_favourite: false,
@@ -1809,6 +1844,7 @@ fn worker_loop(rx: mpsc::Receiver<Job>) {
                         page: None,
                         sidebar: sidebar_json(store),
                         theme: theme_name(store),
+                        font_family: font_family_name(store),
                         view: "journal",
                         search_rows: Vec::new(),
                         page_favourite: false,
@@ -1884,6 +1920,7 @@ fn failed_outcome(error: String) -> Outcome {
         page: None,
         sidebar: "{\"favourites\":[],\"recent\":[]}".to_string(),
         theme: "light".to_string(),
+        font_family: String::new(),
         view: "journal",
         search_rows: Vec::new(),
         page_favourite: false,
@@ -1931,6 +1968,7 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
             Ok(())
         }
         Command::SetTheme { name } => store.set_setting("theme", &name).map_err(fail),
+        Command::SetFontFamily { name } => store.set_setting("font_family", &name).map_err(fail),
         Command::SetFavourite { name, favourite } => {
             let page = store.ensure_page(&name).map_err(fail)?;
             store.set_favourite(page, favourite).map_err(fail)
@@ -2080,6 +2118,7 @@ fn search_outcome(store: &Store, query: &str) -> Outcome {
         page: None,
         sidebar: sidebar_json(store),
         theme: theme_name(store),
+        font_family: font_family_name(store),
         view: "search",
         search_rows: rows,
         page_favourite: false,
@@ -2172,6 +2211,7 @@ fn snapshot(
             page: Some(view),
             sidebar: sidebar_json(store),
             theme: theme.to_string(),
+            font_family: font_family_name(store),
             ready: true,
             can_undo: store.can_undo(),
             can_redo: store.can_redo(),
@@ -2205,6 +2245,7 @@ fn snapshot(
         page: None,
         sidebar: sidebar_json(store),
         theme: theme.to_string(),
+        font_family: font_family_name(store),
         view: "journal",
         search_rows: Vec::new(),
         page_favourite: false,
@@ -2478,6 +2519,16 @@ fn theme_name(store: &Store) -> String {
         .flatten()
         .filter(|name| name == "dark")
         .unwrap_or_else(|| "light".to_string())
+}
+
+fn font_family_name(store: &Store) -> String {
+    store
+        .setting("font_family")
+        .ok()
+        .flatten()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
 }
 
 /// The sidebar as the view reads it: the starred pages, then the most recently opened ones.

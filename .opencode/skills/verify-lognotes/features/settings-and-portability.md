@@ -7,6 +7,7 @@ or imports the graph as a Logseq 0.x Markdown folder. Restore saves the previous
 
 - `settings-open` opens the settings page from the gear and closes with Escape.
 - `settings-paths` names the database file, the backups folder, and the build version.
+- `font-choice` picks the note font and keeps a family that is not installed.
 - `backup-now` writes a backup copy and lists it.
 - `restore-offer` offers a restore and swaps in the chosen graph.
 - `restore-safety` saves the previous database as a pre-restore copy.
@@ -17,6 +18,7 @@ or imports the graph as a Logseq 0.x Markdown folder. Restore saves the previous
 ## How to get to it (user POV)
 
 - Click the gear in the header. Press Escape to close.
+- Choose Change… in APPEARANCE, filter the font list, and pick a family.
 - Choose Back up now, then Restore, and confirm.
 - Choose Export and confirm the folder.
 - Choose Import, pick Merge or Replace, and confirm.
@@ -36,6 +38,16 @@ Preconditions:
   `PASS it names the backups folder`, `PASS the About section names the build and the version is the
   package version`, and `PASS the app can offer a restore`. The values must point inside the
   livetest temp directory.
+- **Note font.** Read `PASS the font picker opens with the filter focused`,
+  `PASS typing in the font filter lists matches`, and
+  `PASS choosing a font sets the notes and is remembered`. Shots `30a-font-dialog-light` and
+  `30c-font-applied`; the detail must repeat the chosen family in `picked=`, `note=`, and `stored=`,
+  and say `rendered=true` for the rendered note text.
+  Read `PASS the Default entry restores the app font`.
+- **Unavailable font.** Read `PASS an unavailable font falls back to the app font` (the note font
+  equals the captured default while the store keeps the missing name) and
+  `PASS the settings row says the font is not installed`. Shot `30d-font-missing`. Then read
+  `PASS picking Default clears an unavailable font`.
 - **Backup now.** Read `PASS back up now writes a copy and lists it: before=1 after=2`.
 - **Export.** Read `PASS export writes bullets into journals/ and a file per page`. Shot
   `31-exported`. Check the archived export path in the detail.

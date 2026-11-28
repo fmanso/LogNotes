@@ -53,7 +53,7 @@ It then uses exactly four H2 sections in this order.
   results view, and escape.
 - [Themes and dialogs](./themes-and-dialogs.md) covers the light and dark switch and the themed
   app-owned dialogs.
-- [Settings and portability](./settings-and-portability.md) covers settings, backup, restore, export,
-  and import.
+- [Settings and portability](./settings-and-portability.md) covers settings, the note font, backup,
+  restore, export, and import.
 - [Agent bridge](./agent-bridge.md) covers the loopback control channel, project context, the
   digest and task write, and its single undo.

@@ -60,6 +60,11 @@ ApplicationWindow {
     // The theme the store remembered, or light until it says otherwise.
     property bool darkTheme: journal.theme === "dark"
 
+    // The note font: the family the store remembered, or the app font. Chrome keeps the app font.
+    property string noteFont: root.fontInstalled(journal.font_family)
+                              ? journal.font_family : Qt.application.font.family
+    property var fontFamilies: []
+
     // The settings page covers the column, the way the results view does — it is a place you go to and
     // come back from, not a dialog over the notes.
     property bool settingsOpen: false
@@ -132,6 +137,46 @@ ApplicationWindow {
                 movePageModel.append({ name: names[index] })
             }
         }
+    }
+
+    // A family stored on another machine is kept, not replaced: until it is installed here the note
+    // text falls back to the app font.
+    function fontInstalled(name) {
+        if (name === "") return false
+        const wanted = name.toLowerCase()
+        for (let index = 0; index < root.fontFamilies.length; index++) {
+            if (root.fontFamilies[index].toLowerCase() === wanted) return true
+        }
+        return false
+    }
+
+    function fillFonts() {
+        fontModel.clear()
+        const query = fontFilter.text.toLowerCase()
+        if (query === "" || "default".indexOf(query) >= 0) {
+            fontModel.append({ name: "" })
+        }
+        for (let index = 0; index < root.fontFamilies.length; index++) {
+            const family = root.fontFamilies[index]
+            if (query === "" || family.toLowerCase().indexOf(query) >= 0) {
+                fontModel.append({ name: family })
+            }
+        }
+        const first = fontModel.count > 0 ? 0 : -1
+        fontList.currentIndex = first
+        fontDialog.previewFamily = first >= 0 ? fontModel.get(first).name : ""
+    }
+
+    function fontIndex(name) {
+        for (let index = 0; index < fontModel.count; index++) {
+            if (fontModel.get(index).name === name) return index
+        }
+        return -1
+    }
+
+    function pickFont(name) {
+        journal.apply_font_family(name)
+        fontDialog.close()
     }
 
     function toggleFold(row, depth, collapsed) {
@@ -323,7 +368,12 @@ ApplicationWindow {
         id: journal
     }
 
-    Component.onCompleted: journal.start()
+    Component.onCompleted: {
+        const families = Qt.fontFamilies()
+        families.sort((a, b) => a.localeCompare(b))
+        root.fontFamilies = families
+        journal.start()
+    }
 
     // The app opens ready to type: today's empty block has the caret before the first keystroke.
     // `revision` fires on every applied snapshot, which `countChanged` cannot do — editing a block
@@ -1798,6 +1848,7 @@ ApplicationWindow {
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
                       : model.text
                 color: kind === "page-header" ? theme.text : theme.textMuted
+                font.family: root.noteFont
                 font.pixelSize: kind === "heading" ? 15 : (kind === "page-header" ? 22 : 13)
                 font.bold: true
                 font.capitalization: (kind === "heading" || kind === "page-header")
@@ -2055,6 +2106,7 @@ ApplicationWindow {
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.text
                     color: model.marker === "DONE" ? theme.textFaint : theme.text
+                    font.family: root.noteFont
                     font.pixelSize: 16
                     font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
@@ -2361,6 +2413,7 @@ ApplicationWindow {
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     color: model.marker === "DONE" ? theme.textFaint : theme.text
+                    font.family: root.noteFont
                     font.pixelSize: 16
                     font.strikeout: model.marker === "DONE"
                     wrapMode: TextEdit.Wrap
@@ -2401,6 +2454,7 @@ ApplicationWindow {
                     textFormat: Text.RichText
                     onLinkActivated: (link) => root.openLink(link)
                     color: model.overdue ? theme.danger : theme.text
+                    font.family: root.noteFont
                     font.pixelSize: 16
                     elide: Text.ElideRight
                 }
@@ -2604,6 +2658,54 @@ ApplicationWindow {
                     font.pixelSize: 22
                     font.bold: true
                 }
+
+                // ---- the note font
+                Column {
+                    width: parent.width
+                    spacing: 8
+
+                    Label {
+                        text: qsTr("APPEARANCE")
+                        color: theme.textGhost
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
+                        font.bold: true
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 12
+
+                        Label {
+                            objectName: "noteFontLabel"
+                            width: parent.width - 140
+                            text: journal.font_family === ""
+                                  ? qsTr("Note font: Default")
+                                  : (root.fontInstalled(journal.font_family)
+                                     ? qsTr("Note font: %1").arg(journal.font_family)
+                                     : qsTr("Note font: %1 (not installed)").arg(journal.font_family))
+                            color: theme.text
+                            font.pixelSize: 13
+                            elide: Text.ElideRight
+                        }
+
+                        QuietButton {
+                            objectName: "chooseFont"
+                            text: qsTr("Change…")
+                            onClicked: fontDialog.open()
+                        }
+                    }
+
+                    Label {
+                        width: parent.width
+                        text: qsTr("Applies to the note editor and rendered notes.")
+                        color: theme.textFaint
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: theme.rule }
 
                 // ---- where everything is
                 Column {
@@ -2900,6 +3002,10 @@ ApplicationWindow {
         id: movePageModel
     }
 
+    ListModel {
+        id: fontModel
+    }
+
     ThemedDialog {
         id: movePageDialog
         title: qsTr("Move block to page")
@@ -2979,6 +3085,114 @@ ApplicationWindow {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    ThemedDialog {
+        id: fontDialog
+        objectName: "fontDialog"
+        width: 460
+        title: qsTr("Note font")
+        property string previewFamily: ""
+
+        onOpened: {
+            fontFilter.text = ""
+            root.fillFonts()
+            const current = root.fontIndex(journal.font_family)
+            fontList.currentIndex = current >= 0 ? current : 0
+            fontFilter.forceActiveFocus()
+        }
+
+        contentItem: Column {
+            width: 420
+            spacing: 8
+
+            QuietField {
+                id: fontFilter
+                objectName: "fontFilter"
+                width: parent.width
+                placeholderText: qsTr("Filter fonts…")
+                onTextChanged: root.fillFonts()
+                onAccepted: {
+                    if (fontModel.count > 0) {
+                        const name = fontModel.get(fontList.currentIndex < 0
+                                                    ? 0 : fontList.currentIndex).name
+                        root.pickFont(name)
+                    }
+                }
+                Keys.onDownPressed: {
+                    if (fontList.count > 0) {
+                        fontList.currentIndex = Math.min(fontList.currentIndex + 1,
+                                                         fontList.count - 1)
+                    }
+                }
+                Keys.onUpPressed: {
+                    if (fontList.count > 0) {
+                        fontList.currentIndex = Math.max(fontList.currentIndex - 1, 0)
+                    }
+                }
+            }
+
+            Label {
+                objectName: "fontPreview"
+                width: parent.width
+                text: qsTr("The quick brown fox jumps over the lazy dog.")
+                color: theme.text
+                font.family: fontDialog.previewFamily
+                font.pixelSize: 16
+                elide: Text.ElideRight
+            }
+
+            ListView {
+                id: fontList
+                objectName: "fontList"
+                width: parent.width
+                height: 260
+                clip: true
+                model: fontModel
+                onCurrentIndexChanged: {
+                    if (fontList.currentIndex >= 0 && fontModel.count > 0) {
+                        fontDialog.previewFamily = fontModel.get(fontList.currentIndex).name
+                    }
+                }
+
+                delegate: Item {
+                    width: fontList.width
+                    height: 30
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: ListView.isCurrentItem ? theme.hover : "transparent"
+                    }
+
+                    Label {
+                        objectName: "fontFamilyItem"
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: model.name === "" ? qsTr("Default") : model.name
+                        color: theme.text
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.pickFont(model.name)
+                    }
+                }
+            }
+        }
+
+        footer: Row {
+            spacing: 8
+            anchors.right: parent.right
+
+            QuietButton {
+                objectName: "cancelFont"
+                text: qsTr("Cancel")
+                onClicked: fontDialog.close()
             }
         }
     }
