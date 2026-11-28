@@ -243,24 +243,6 @@ pub mod qobject {
         #[qinvokable]
         fn outdent(self: Pin<&mut Self>, row: i32);
 
-        /// Swap the block at `row` with its previous or next sibling.
-        #[qinvokable]
-        fn move_up(self: Pin<&mut Self>, row: i32, text: &QString);
-
-        #[qinvokable]
-        fn move_down(self: Pin<&mut Self>, row: i32, text: &QString);
-
-        /// Place a block immediately after or before another block.
-        #[qinvokable]
-        fn move_block_after(self: Pin<&mut Self>, block_id: i32, anchor_id: i32);
-
-        #[qinvokable]
-        fn move_block_before(self: Pin<&mut Self>, block_id: i32, anchor_id: i32);
-
-        /// Send a block (with its subtree) to the end of a named page or day.
-        #[qinvokable]
-        fn move_block_to_page(self: Pin<&mut Self>, block_id: i32, name: &QString);
-
         #[qinvokable]
         fn remove(self: Pin<&mut Self>, row: i32);
 
@@ -544,11 +526,6 @@ enum Command {
     SetMarkerWithContent { block_id: i32, marker: Option<Marker>, text: String },
     SetScheduled { block_id: i32, date: Option<String> },
     SetScheduledWithContent { block_id: i32, date: Option<String>, text: String },
-    MoveUp { block_id: i32, text: String },
-    MoveDown { block_id: i32, text: String },
-    MoveAfter { block_id: i32, anchor_id: i32 },
-    MoveBefore { block_id: i32, anchor_id: i32 },
-    MoveToPage { block_id: i32, name: String },
     SetCollapsed { block_id: i32, collapsed: bool },
     Undo,
     Redo,
@@ -1006,50 +983,6 @@ impl qobject::Journal {
         if let Some(block_id) = self.block_at(row) {
             self.as_mut().dispatch(Some(Command::Indent { block_id }));
         }
-    }
-
-    fn move_up(mut self: Pin<&mut Self>, row: i32, text: &QString) {
-        if let Some(block_id) = self.block_at(row) {
-            self.as_mut().rust_mut().pending_focus = block_id;
-            self.as_mut().dispatch(Some(Command::MoveUp {
-                block_id,
-                text: text.to_string(),
-            }));
-        }
-    }
-
-    fn move_down(mut self: Pin<&mut Self>, row: i32, text: &QString) {
-        if let Some(block_id) = self.block_at(row) {
-            self.as_mut().rust_mut().pending_focus = block_id;
-            self.as_mut().dispatch(Some(Command::MoveDown {
-                block_id,
-                text: text.to_string(),
-            }));
-        }
-    }
-
-    fn move_block_after(mut self: Pin<&mut Self>, block_id: i32, anchor_id: i32) {
-        self.as_mut().rust_mut().pending_focus = block_id;
-        self.as_mut().dispatch(Some(Command::MoveAfter {
-            block_id,
-            anchor_id,
-        }));
-    }
-
-    fn move_block_before(mut self: Pin<&mut Self>, block_id: i32, anchor_id: i32) {
-        self.as_mut().rust_mut().pending_focus = block_id;
-        self.as_mut().dispatch(Some(Command::MoveBefore {
-            block_id,
-            anchor_id,
-        }));
-    }
-
-    fn move_block_to_page(mut self: Pin<&mut Self>, block_id: i32, name: &QString) {
-        self.as_mut().rust_mut().pending_focus = block_id;
-        self.as_mut().dispatch(Some(Command::MoveToPage {
-            block_id,
-            name: name.to_string(),
-        }));
     }
 
     fn outdent(mut self: Pin<&mut Self>, row: i32) {
@@ -1937,24 +1870,6 @@ fn deliver(queue: CxxQtThread<Journal>, outcome: Outcome) {
     let _ = queue.queue(move |journal: Pin<&mut Journal>| journal.apply(outcome));
 }
 
-fn write_if_changed(store: &mut Store, block_id: i32, text: &str) -> Result<(), String> {
-    let page = store
-        .page_of_block(block_id as i64)
-        .map_err(|error| error.to_string())?;
-    let current = store
-        .page_blocks(page.id)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|row| row.id == block_id as i64)
-        .map(|row| row.content);
-    if current.as_deref() != Some(text) {
-        store
-            .update_content(block_id as i64, text)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
 fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
     let fail = |error: lognotes_core::Error| error.to_string();
 
@@ -2031,29 +1946,6 @@ fn run_command(store: &mut Store, command: Command) -> Result<(), String> {
             text,
         } => store
             .set_scheduled_with_content(block_id as i64, date.as_deref(), &text)
-            .map_err(fail),
-        Command::MoveUp { block_id, text } => {
-            write_if_changed(store, block_id, &text)?;
-            store.move_up(block_id as i64).map_err(fail)
-        }
-        Command::MoveDown { block_id, text } => {
-            write_if_changed(store, block_id, &text)?;
-            store.move_down(block_id as i64).map_err(fail)
-        }
-        Command::MoveAfter {
-            block_id,
-            anchor_id,
-        } => store
-            .move_block_after(block_id as i64, anchor_id as i64)
-            .map_err(fail),
-        Command::MoveBefore {
-            block_id,
-            anchor_id,
-        } => store
-            .move_block_before(block_id as i64, anchor_id as i64)
-            .map_err(fail),
-        Command::MoveToPage { block_id, name } => store
-            .move_block_to_page(block_id as i64, &name)
             .map_err(fail),
         Command::SetCollapsed { block_id, collapsed } => store
             .set_collapsed(block_id as i64, collapsed)
@@ -2797,41 +2689,6 @@ mod tests {
             "{\"start\":3,\"end\":7,\"query\":\"My\"}"
         );
         assert_eq!(link_query_json("plain", 5), "");
-    }
-
-    #[test]
-    fn bridge_move_commands_reorder_and_send_to_a_page() {        let mut store = session();
-        let day = store.ensure_journal_page("2026-11-02").expect("a day");
-        let a = store.insert_block(day, None, "a").expect("a") as i32;
-        let b = store.insert_block(day, None, "b").expect("b") as i32;
-
-        run_command(
-            &mut store,
-            Command::MoveUp {
-                block_id: b,
-                text: "b".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(blocks(&store, "2026-11-02"), ["b", "a"]);
-
-        run_command(&mut store, Command::MoveAfter { block_id: a, anchor_id: b }).unwrap();
-        assert_eq!(blocks(&store, "2026-11-02"), ["b", "a"]);
-        run_command(&mut store, Command::MoveBefore { block_id: a, anchor_id: b }).unwrap();
-        assert_eq!(blocks(&store, "2026-11-02"), ["a", "b"]);
-
-        let target = store.ensure_page("Target").expect("a page");
-        run_command(
-            &mut store,
-            Command::MoveToPage {
-                block_id: b,
-                name: "Target".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(blocks(&store, "2026-11-02"), ["a"]);
-        let moved = store.page_blocks(target).expect("the target");
-        assert_eq!(moved[0].content, "b");
     }
 
     #[test]

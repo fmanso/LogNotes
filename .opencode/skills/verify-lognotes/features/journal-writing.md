@@ -1,14 +1,13 @@
 # Journal writing
 
 The journal is the default view. The caret lands in today's block, and typing, Enter, indentation,
-reordering, undo, fences, and the slash menu all operate on ordinary blocks that persist to SQLite.
+undo, fences, and the slash menu all operate on ordinary blocks that persist to SQLite.
 
 ## Sub-features
 
 - `journal-open` opens the window with the caret in today's block.
 - `journal-type` sends text to the store.
 - `journal-split` splits a block on Enter and keeps the caret in the new block.
-- `journal-reorder` swaps a block with a sibling by Alt+Up/Down and Ctrl+Shift+Up/Down.
 - `journal-navigate` moves the caret between blocks at the first and last line.
 - `journal-indent` indents with Tab, outdents with Shift+Tab, and folds a parent with its chevron.
 - `journal-undo` undoes and redoes edits with Ctrl+Z and Ctrl+Y.
@@ -19,8 +18,7 @@ reordering, undo, fences, and the slash menu all operate on ordinary blocks that
 ## How to get to it (user POV)
 
 - Launch the app. The caret is in today's block.
-- Type text, press Enter, Tab, Shift+Tab, Alt+Up, Alt+Down, Ctrl+Shift+Up, Ctrl+Shift+Down, Ctrl+Z,
-  and Ctrl+Y in the block editor.
+- Type text, press Enter, Tab, Shift+Tab, Ctrl+Z, and Ctrl+Y in the block editor.
 - Click a block that is at rest to edit it. Click the chevron to fold its children.
 - Type `` ``` `` in a block to start a fence.
 - Type `/` at the start of a block to open the command menu, then type to filter it.
@@ -37,8 +35,7 @@ Preconditions:
   `PASS caret is in today's block on launch`.
 - **Type and split.** Read `PASS typing reached the store: blocks=["hello world"]`, then
   `PASS enter split the block and left an empty one`. Shots `02-typed`, `03-enter`, `04-second-block`.
-- **Reorder.** Read the three labels starting `alt+up swaps`, `ctrl+shift+down swaps`, and
-  `the navigation edits undo back`.
+- **Navigation undo.** Read `the navigation edits undo back to the original text`.
 - **Navigate.** Read `up from the first line moves to the previous block` and
   `down from the last line moves to the next block`.
 - **Indent and fold.** Read `tab indented the block`, `folding hides a block's children`,
@@ -64,8 +61,6 @@ Preconditions:
 
 - The slash filter steps are timing-sensitive. A lone failure there, with `/t` left in the block text
   and a query left in the search field, points at a focus race. Re-run before diagnosing a menu bug.
-- `Alt+Up` and `Ctrl+Shift+Up` both reorder. The scenario exercises both, so a failure in one does
-  not mean the shortcut is gone.
 - A block being edited shows its plain text. A block at rest shows rendered Markdown. Check
   `rendered_html` for the rendered form and `editor_text` for the source.
 - The fresh database makes ids and dates run-specific. Do not compare them across runs.

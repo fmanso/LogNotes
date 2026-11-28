@@ -14,7 +14,7 @@ diagrams — and the block you are typing in stays plain text.
 
 - **Journal-first outliner.** A page per day, blocks typed and edited in place, indented and outdented from
   the keyboard. Empty days you never wrote in leave no trace. A Date control opens any day, written or not;
-  blocks reorder with `Alt+Up`/`Alt+Down` and fold with the chevron beside them.
+  blocks fold with the chevron beside them.
 - **Pages, links, tags, backlinks.** `[[Page]]` and `#tag` create and link pages; a page ends with its linked
   references and its plain mentions. Pages can be renamed or deleted, and typing `[[` completes page names.
 - **Tasks and scheduling.** A marker cycled by `Ctrl+Enter`, a `SCHEDULED` date by `Ctrl+Shift+S`, and what

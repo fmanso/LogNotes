@@ -15,7 +15,6 @@ the quick switcher, a link click, or the date control.
 - `page-menu` opens a page's header menu.
 - `page-rename` rewrites links to the old name and undoes as one step.
 - `page-delete` refuses a linked page and deletes an unlinked one.
-- `block-move` moves a block to another page.
 - `day-control` opens a day from the calendar and creates it on the first keystroke.
 - `day-link` opens a day from a `[[YYYY-MM-DD]]` link.
 
@@ -26,7 +25,7 @@ the quick switcher, a link click, or the date control.
 - Click the `My Project` link in a block at rest.
 - Click a star on the page header to favourite it.
 - Press Ctrl+B to hide or show the sidebar.
-- Use the page header menu to rename, delete, or move a block.
+- Use the page header menu to rename or delete a page.
 - Click the date control to open the calendar, pick a day, and type in the unwritten day.
 - Click a `[[YYYY-MM-DD]]` link in a block at rest.
 
@@ -64,8 +63,6 @@ Preconditions:
 - **Delete rules.** Read `PASS a linked page reports how many links it has`,
   `PASS a linked page is not deleted`, and
   `PASS an unlinked page is deleted and the journal returns`. Shot `29b-page-deleted`.
-- **Move to page.** Read `PASS move to page sends the block to the chosen page`. Shots
-  `29c-move-dialog-light`, `29c-move-dialog-dark`, `29c-moved-to-page`.
 - **Day control.** Read `PASS the journal has a date control`,
   `PASS the date control closes without opening a day`,
   `PASS an unwritten day opens without a row`, and

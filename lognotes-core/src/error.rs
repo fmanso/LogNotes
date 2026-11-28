@@ -34,9 +34,6 @@ pub enum Error {
     #[error("the page still has {0} linked references")]
     PageHasLinks(usize),
 
-    #[error("a block cannot be moved inside itself")]
-    MoveIntoSelf,
-
     #[error("offset {0} is not on a character boundary")]
     BadOffset(usize),
 

@@ -273,7 +273,7 @@ with the command's effect and never types markdown into the block, and each comm
   the page's own colours. The date picker and the completion menus are cream panels with a hairline border
   and a tinted hover row, because the control style's default chrome is dark and the text drawn on it was
   `#242424` on `#2a2a2a` — a menu you could not read.
-- **Dialogs are skinned, not stock.** Every in-app modal dialog — rename, delete, move to page, import
+- **Dialogs are skinned, not stock.** Every in-app modal dialog — rename, delete, import
   mode, restore, and export — uses `ThemedDialog`: the page surface, a hairline border, a themed title,
   and a themed modal overlay, with `QuietField` for its text inputs. A stock `Dialog` takes its panel and
   header from the system palette, which is not the app's own light/dark theme: with a light app theme on
@@ -336,14 +336,6 @@ A block with children shows a chevron; clicking it persists `collapsed` and omit
 snapshot, so reopening the page or restarting the app keeps them hidden. Folding is view state, like a star
 or a visit: it does not enter the undo history, and one undo never unfolds something the user folded. If the
 caret was inside the folded subtree, it moves to the folded block.
-
-## Moving blocks
-
-Alt+Up/Down swaps the caret's block with its previous or next sibling; Ctrl+Shift+Up/Down is the fallback
-where the desktop owns Alt. Hover a block to reveal its drag handle; dragging it above or below another
-block sends one move to the store. Ctrl+Shift+M opens the "Move to page" picker over the page names in the
-snapshot, including written journal days. A move carries the whole subtree and its page ownership, is one
-undo step, and is refused when the target is inside the block itself.
 
 ## Page actions
 

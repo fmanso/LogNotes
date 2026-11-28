@@ -76,10 +76,6 @@ ApplicationWindow {
     property string pendingRestoreName: ""
     // The page whose header menu is open, for the rename/delete dialogs.
     property string pageActionName: ""
-    // The block whose "move to page" picker is open.
-    property int moveBlockId: -1
-    // The block being dragged by its handle, -1 when none is.
-    property int dragBlockId: -1
 
     function openSettings() {
         root.settingsOpen = true
@@ -126,17 +122,6 @@ ApplicationWindow {
         if (kind === "pre-migration") return qsTr("before upgrade")
         if (kind === "pre-restore") return qsTr("before restore")
         return kind
-    }
-
-    function fillMovePages() {
-        movePageModel.clear()
-        const names = JSON.parse(journal.page_names === "" ? "[]" : journal.page_names)
-        const query = movePageFilter.text.toLowerCase()
-        for (let index = 0; index < names.length; index++) {
-            if (query === "" || names[index].toLowerCase().indexOf(query) >= 0) {
-                movePageModel.append({ name: names[index] })
-            }
-        }
     }
 
     // A family stored on another machine is kept, not replaced: until it is installed here the note
@@ -1821,9 +1806,7 @@ ApplicationWindow {
 
             property alias blockEditor: editor
             property bool isBlock: kind === "block" || kind === "placeholder"
-            property int rowBlockId: model.blockId
             property int rowDepth: model.depth
-            property bool rowIsBlock: kind === "block"
             property bool isHeading: kind === "heading" || kind === "agenda-header"
                     || kind === "page-header" || kind === "reference-header"
                     || kind === "unlinked-header"
@@ -1989,57 +1972,6 @@ ApplicationWindow {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.toggleFold(index, model.depth, model.collapsed)
-                    }
-                }
-
-                // A handle for reordering the block. It also gives the mouse somewhere to start a
-                // drag that is not the text itself.
-                Item {
-                    id: dragHandle
-                    objectName: "dragHandle"
-                    visible: rowItem.rowIsBlock
-                             && (rowItem.hovered || root.dragBlockId === model.blockId)
-                    x: model.depth * 24 + 14
-                    width: 12
-                    height: 20
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    Label {
-                        anchors.centerIn: parent
-                        text: "⋮"
-                        color: theme.textGhost
-                        font.pixelSize: 14
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        preventStealing: true
-                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-                        onPressed: root.dragBlockId = model.blockId
-                        onReleased: {
-                            if (root.dragBlockId < 0) {
-                                return
-                            }
-                            const dragged = root.dragBlockId
-                            root.dragBlockId = -1
-                            const point = dragHandle.mapToItem(list, mouse.x, mouse.y)
-                            const row = list.indexAt(point.x, point.y + list.contentY)
-                            if (row < 0) {
-                                return
-                            }
-                            const target = list.itemAtIndex(row)
-                            if (!target || !target.rowIsBlock || target.rowBlockId === dragged
-                                    || target.rowBlockId < 0) {
-                                return
-                            }
-                            const contentY = point.y + list.contentY
-                            if (contentY < target.y + target.height / 2) {
-                                journal.move_block_before(dragged, target.rowBlockId)
-                            } else {
-                                journal.move_block_after(dragged, target.rowBlockId)
-                            }
-                        }
-                        onCanceled: root.dragBlockId = -1
                     }
                 }
 
@@ -2270,33 +2202,7 @@ ApplicationWindow {
                                 event.accepted = true
                                 return
                             }
-                        } else if (event.key === Qt.Key_Up
-                                   && ((event.modifiers & Qt.AltModifier)
-                                       || ((event.modifiers & Qt.ControlModifier)
-                                           && (event.modifiers & Qt.ShiftModifier)))) {
-                            // Alt+Up reorders among siblings; Ctrl+Shift+Up is the fallback where the
-                            // desktop owns Alt. The caret follows the block by id.
-                            debounce.stop()
-                            root.rebuilding = true
-                            root.wantsFocus = true
-                            journal.move_up(index, text)
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Down
-                                   && ((event.modifiers & Qt.AltModifier)
-                                       || ((event.modifiers & Qt.ControlModifier)
-                                           && (event.modifiers & Qt.ShiftModifier)))) {
-                            debounce.stop()
-                            root.rebuilding = true
-                            root.wantsFocus = true
-                            journal.move_down(index, text)
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_M
-                                   && (event.modifiers & Qt.ControlModifier)
-                                   && (event.modifiers & Qt.ShiftModifier)) {
-                            root.moveBlockId = model.blockId
-                            movePageDialog.open()
-                            event.accepted = true
-                        } else if ((event.key === Qt.Key_Up || event.key === Qt.Key_Down)
+                                                } else if ((event.key === Qt.Key_Up || event.key === Qt.Key_Down)
                                    && (event.modifiers
                                        & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) === 0
                                    && editor.selectedText.length === 0) {
@@ -3012,94 +2918,7 @@ ApplicationWindow {
     }
 
     ListModel {
-        id: movePageModel
-    }
-
-    ListModel {
         id: fontModel
-    }
-
-    ThemedDialog {
-        id: movePageDialog
-        title: qsTr("Move block to page")
-
-        onOpened: {
-            movePageFilter.text = ""
-            root.fillMovePages()
-            movePageFilter.forceActiveFocus()
-            movePageList.currentIndex = movePageModel.count > 0 ? 0 : -1
-        }
-
-        contentItem: Column {
-            width: 420
-            spacing: 8
-
-            QuietField {
-                id: movePageFilter
-                objectName: "movePageFilter"
-                width: parent.width
-                placeholderText: qsTr("Filter pages…")
-                onTextChanged: {
-                    root.fillMovePages()
-                    movePageList.currentIndex = movePageModel.count > 0 ? 0 : -1
-                }
-                onAccepted: {
-                    if (movePageModel.count > 0) {
-                        const name = movePageModel.get(movePageList.currentIndex < 0
-                                                        ? 0 : movePageList.currentIndex).name
-                        journal.move_block_to_page(root.moveBlockId, name)
-                        movePageDialog.close()
-                    }
-                }
-                Keys.onDownPressed: {
-                    if (movePageList.count > 0) {
-                        movePageList.currentIndex = Math.min(movePageList.currentIndex + 1,
-                                                             movePageList.count - 1)
-                    }
-                }
-                Keys.onUpPressed: {
-                    if (movePageList.count > 0) {
-                        movePageList.currentIndex = Math.max(movePageList.currentIndex - 1, 0)
-                    }
-                }
-            }
-
-            ListView {
-                id: movePageList
-                width: parent.width
-                height: 240
-                clip: true
-                model: movePageModel
-
-                delegate: Item {
-                    width: movePageList.width
-                    height: 30
-
-                    Rectangle {
-                        anchors.fill: parent
-                        color: ListView.isCurrentItem ? theme.hover : "transparent"
-                    }
-
-                    Label {
-                        anchors.left: parent.left
-                        anchors.leftMargin: 10
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: model.name
-                        color: theme.text
-                        font.pixelSize: 13
-                        elide: Text.ElideRight
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: {
-                            journal.move_block_to_page(root.moveBlockId, model.name)
-                            movePageDialog.close()
-                        }
-                    }
-                }
-            }
-        }
     }
 
     ThemedDialog {

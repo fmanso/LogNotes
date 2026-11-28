@@ -29,31 +29,26 @@ palette and the app theme disagree.
 ### Requirement: Dialogs share the window's surface and controls
 In-app dialogs SHALL use the same visual vocabulary as the window's other overlays: the themed page
 surface, a hairline border, rounded corners, themed hover states, and the window's quiet buttons for their
-actions. The rename, delete, move-to-page, import-mode, restore-confirmation, and export-confirmation
+actions. The rename, delete, import-mode, restore-confirmation, and export-confirmation
 dialogs SHALL all use that presentation.
 
 #### Scenario: One presentation across dialogs
-- **WHEN** any of the rename, delete, move-to-page, import-mode, restore, or export dialogs opens
+- **WHEN** any of the rename, delete, import-mode, restore, or export dialogs opens
 - **THEN** it shows the same themed panel, border, title treatment, and button style as the app's date
   picker and menus
 
 ### Requirement: Editable dialog fields stay legible in both themes
 Text inputs inside dialogs SHALL use the active theme for their surface, text, border, placeholder, and
-focused border, including the rename field and the move-to-page filter.
+focused border, including the rename field.
 
 #### Scenario: Rename field in either theme
 - **WHEN** the rename dialog opens in the light or dark theme
 - **THEN** the current name is readable in the theme's text colour, the field border is the theme's
   border, and the focused field uses the theme's accent
 
-#### Scenario: Move filter in either theme
-- **WHEN** the user types into the move-to-page filter in the light or dark theme
-- **THEN** both the filter text and its placeholder are readable against the dialog surface
-
 ### Requirement: Theming does not change dialog interaction
 Restyling a dialog SHALL NOT change how it is operated: the appropriate field or list SHALL take focus on
-open, Enter SHALL accept, Escape SHALL cancel or dismiss without writing, and the move-to-page list SHALL
-keep keyboard navigation.
+open, Enter SHALL accept, and Escape SHALL cancel or dismiss without writing.
 
 #### Scenario: Rename keeps its keyboard path
 - **WHEN** the rename dialog opens and the user edits the name and presses Enter
@@ -62,8 +57,3 @@ keep keyboard navigation.
 #### Scenario: Escape backs out
 - **WHEN** any of these dialogs is open and the user presses Escape
 - **THEN** the dialog closes without performing its action
-
-#### Scenario: Move picker keyboard path
-- **WHEN** the move-to-page dialog is open
-- **THEN** the filter takes focus, arrow keys move through the page list, and Enter moves the block to the
-  highlighted page

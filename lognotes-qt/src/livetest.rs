@@ -156,23 +156,6 @@ pub fn run() -> ! {
         format!("blocks={:?}", blocks(&root)),
     );
 
-    // Alt+Up/Down reorder the block without moving the caret out of it.
-    driver::press_key(key::UP, modifier::ALT);
-    driver::settle();
-    check(
-        "alt+up swaps the block with its previous sibling",
-        blocks(&root) == ["second", "hello world"],
-        format!("blocks={:?}", blocks(&root)),
-    );
-    // Alt+Down is sometimes owned by the desktop; Ctrl+Shift+Down is the same action.
-    driver::press_key(key::DOWN, modifier::CTRL | modifier::SHIFT);
-    driver::settle();
-    check(
-        "ctrl+shift+down swaps it back",
-        blocks(&root) == ["hello world", "second"],
-        format!("blocks={:?}", blocks(&root)),
-    );
-
     // Up/Down at the text edge move the caret into the neighbouring block, and a keystroke lands
     // there immediately afterwards.
     driver::press_key(key::UP, modifier::NONE);
@@ -964,69 +947,6 @@ pub fn run() -> ! {
         format!("note={:?}", action_note()),
     );
     shot("29b-page-deleted");
-
-    // Move to page: create a target, open the linked page, and send its block there.
-    driver::call_journal(
-        &QString::from("open_page"),
-        &QString::from("Target Page"),
-    );
-    wait_until(|| {
-        driver::named_text(&QString::from("pageHeading"), 0).to_string() == "Target Page"
-    });
-    driver::call_journal(
-        &QString::from("open_page"),
-        &QString::from("My Project"),
-    );
-    wait_until(|| {
-        driver::named_text(&QString::from("pageHeading"), 0).to_string() == "My Project"
-    });
-    let move_row = row_with("R");
-    driver::click_block_at(move_row, 0.05);
-    driver::settle();
-    driver::press_key(key::M, modifier::CTRL | modifier::SHIFT);
-    driver::settle();
-    shot("29c-move-dialog-light");
-    check(
-        "the move dialog opens in the light theme",
-        driver::visible(&QString::from("movePageFilter"))
-            && driver::journal_property(&QString::from("theme")).to_string() == "light",
-        format!(
-            "theme={}",
-            driver::journal_property(&QString::from("theme")).to_string()
-        ),
-    );
-    driver::call_journal(&QString::from("apply_theme"), &QString::from("dark"));
-    driver::settle();
-    shot("29c-move-dialog-dark");
-    check(
-        "the move dialog follows the theme switch",
-        driver::visible(&QString::from("movePageFilter"))
-            && driver::journal_property(&QString::from("theme")).to_string() == "dark",
-        format!(
-            "theme={}",
-            driver::journal_property(&QString::from("theme")).to_string()
-        ),
-    );
-    driver::call_journal(&QString::from("apply_theme"), &QString::from("light"));
-    driver::settle();
-    driver::click_named(&QString::from("movePageFilter"), 0);
-    driver::settle();
-    driver::type_text(&QString::from("Target Page"));
-    driver::press_key(key::RETURN, modifier::NONE);
-    driver::settle();
-    check(
-        "move to page sends the block to the chosen page",
-        page_blocks(&root, "Target Page")
-            .iter()
-            .any(|block| block.contains('R'))
-            && page_blocks(&root, "My Project").is_empty(),
-        format!(
-            "target={:?} source={:?}",
-            page_blocks(&root, "Target Page"),
-            page_blocks(&root, "My Project")
-        ),
-    );
-    shot("29c-moved-to-page");
 
     // Date navigation: the control opens, and an unwritten day is a page without a database row
     // until the first keystroke.

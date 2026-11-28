@@ -117,8 +117,6 @@ ever visible.
 | `set_scheduled(block, date)` | Sets or clears the scheduled date. Scheduling a block that is not a task also marks it TODO, in the same composite action, because the agenda lists tasks and a date on an untasked block would silently never appear. |
 | `set_scheduled_with_content(block, date, text)` | The same date rule with a rewritten text, again as one step. |
 | `indent(block)` / `outdent(block)` | Re-parents within the same page, keeping a valid key among the new siblings. |
-| `move(block, page, after)` | Moves a block (with its subtree) between pages or positions; the subtree's page ownership follows it. |
-| `move_up(block)` / `move_down(block)` | Swaps a block with its previous or next sibling; the ends are no-ops. |
 | `delete_block(block)` | Removes the block and its subtree. |
 | `set_favourite(page, bool)` | Stars or unstars a page. Outside the undo history. |
 | `record_visit(page)` | Records that a page was opened, by bumping a counter. Outside the undo history. |
@@ -231,9 +229,7 @@ stays an ordinary page, because `ensure_date` round-trips the string before acce
 Sibling order is a fractional key: a sortable string strictly between two neighbours, no renumbering on
 insert. Keys are generated in exactly one place in this crate, and the unique sibling index is the
 backstop against a duplicate. Repeated insertion into the same gap lengthens keys; at personal-note scale
-that is invisible, and a rebalance is therefore not implemented. A cross-page move updates the moved
-block and every descendant's page ownership in the same composite action; the inverse restores both the
-position and the ownership.
+that is invisible, and a rebalance is therefore not implemented.
 
 ## Code fences
 
@@ -326,7 +322,7 @@ before anything is written.
 
 One typed error enum — `NotFound`, `InvalidPosition` (no key fits between the neighbours), `BadOffset`
 (not on a character boundary), `BadDate`, `BadPageName`, `BadRenameName`, `PageExists`, `PageNotFound`,
-`PageHasLinks`, `MoveIntoSelf`, `InvalidConsolidation` (a project write was refused before changing
+`PageHasLinks`, `InvalidConsolidation` (a project write was refused before changing
 anything), `SchemaTooNew`, `Storage` (wrapped sqlite error), `Backup` (a copy or an export could not be
 written). No panic on any input the bridge can pass. Every variant carries enough context to name the
 offending page or block in a UI message.
@@ -354,7 +350,7 @@ when the link is removed; a plain mention appearing once, never duplicating a li
 whole words only; mentions not creating pages; `pages()` listing named pages and written journal days; and markers
 and scheduled dates surviving a reindex.
 
-Covered from this capability: a cross-page move carries the subtree's page ownership and one undo restores both; moving into a descendant is refused. Folding hides children, survives a
+Covered from this capability: folding hides children, survives a
 reopened store, and is not an undo step. Renaming rewrites links and tags outside code as one step, and
 deleting refuses while a link remains and restores the page and its blocks on undo.
 

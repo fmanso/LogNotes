@@ -1,14 +1,13 @@
 # Themes and dialogs
 
 The theme button switches the whole window between light and dark, and the choice persists. Every
-app-owned modal dialog follows the current theme, including rename, move, import, and export, and it
+app-owned modal dialog follows the current theme, including rename, import, and export, and it
 re-themes while open.
 
 ## Sub-features
 
 - `theme-toggle` switches light and dark from the theme button.
 - `theme-dialog-rename` opens the rename dialog in the current theme and follows a switch.
-- `theme-dialog-move` opens the move-to-page dialog in the current theme and follows a switch.
 - `theme-dialog-import` opens the import mode dialog in the current theme and follows a switch.
 - `theme-dialog-export` opens the export confirmation in the current theme and follows a switch.
 - `theme-dialog-font` opens the note font picker in the current theme and follows a switch.
@@ -17,7 +16,7 @@ re-themes while open.
 ## How to get to it (user POV)
 
 - Click the sun or moon button in the header.
-- Open a page menu and choose Rename, or a block menu and choose Move to page.
+- Open a page menu and choose Rename.
 - In settings, choose Export or Import.
 - Watch the dialog stay legible while the theme changes.
 
@@ -27,16 +26,13 @@ Preconditions:
 
 - `scripts/doctor.sh` passes.
 - `scripts/verify.sh` has produced `livetest.log` and `shots/`.
-- The page and block steps ran first, so the rename and move dialogs have content.
+- The page steps ran first, so the rename dialog has content.
 
 - **Toggle.** Read `PASS the theme button switches to dark: theme=dark` and
   `PASS and back to light: theme=light`. Shot `16b-dark-theme`.
 - **Rename dialog.** Read `PASS the rename dialog opens in the light theme: theme=light` and
   `PASS the rename dialog follows the theme switch: theme=dark`. Shots
   `29a-rename-dialog-light`, `29a-rename-dialog-dark`.
-- **Move dialog.** Read `PASS the move dialog opens in the light theme` and
-  `PASS the move dialog follows the theme switch`. Shots `29c-move-dialog-light`,
-  `29c-move-dialog-dark`.
 - **Settings.** Read `PASS the settings page survives the theme switch: theme=dark`. Shot
   `31b-settings-dark`.
 - **Font picker.** Read `PASS the font picker follows the theme switch: theme=dark`. Shots

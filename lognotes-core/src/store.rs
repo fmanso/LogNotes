@@ -119,10 +119,6 @@ enum Action {
         parent_id: Option<i64>,
         order_key: String,
     },
-    SetPage {
-        block_id: i64,
-        page_id: i64,
-    },
     SetMarker {
         block_id: i64,
         marker: Option<Marker>,
@@ -512,172 +508,6 @@ impl Store {
             parent_id: parent.parent_id,
             order_key: key_between(Some(&parent.order_key), next.as_deref())?,
         })
-    }
-
-    /// Move a block (with its subtree) to a position on a page.
-    ///
-    /// `after` is the sibling to sit behind; its parent is the new parent. `after = None` appends at the
-    /// top level of the target page. The whole subtree moves page ownership with it.
-    pub fn move_block(&mut self, block_id: i64, page_id: i64, after: Option<i64>) -> Result<()> {
-        let record = block_record(&self.conn, block_id)?;
-        self.page(page_id)?;
-
-        let (parent_id, order_key) = match after {
-            Some(anchor_id) => {
-                let anchor = block_record(&self.conn, anchor_id)?;
-                if anchor.page_id != page_id {
-                    return Err(Error::NotFound(anchor_id));
-                }
-                let next = self.next_sibling_key(page_id, anchor.parent_id, &anchor.order_key)?;
-                (
-                    anchor.parent_id,
-                    key_between(Some(&anchor.order_key), next.as_deref())?,
-                )
-            }
-            None => {
-                let last = last_top_key(&self.conn, page_id)?;
-                (None, key_between(last.as_deref(), None)?)
-            }
-        };
-
-        if let Some(parent_id) = parent_id {
-            if parent_id == block_id || is_descendant(&self.conn, parent_id, block_id)? {
-                return Err(Error::MoveIntoSelf);
-            }
-        }
-
-        let mut actions = vec![Action::SetPosition {
-            block_id,
-            page_id,
-            parent_id,
-            order_key,
-        }];
-        if page_id != record.page_id {
-            for descendant in subtree(&self.conn, block_id)?.into_iter().skip(1) {
-                if descendant.page_id != page_id {
-                    actions.push(Action::SetPage {
-                        block_id: descendant.id,
-                        page_id,
-                    });
-                }
-            }
-        }
-        self.exec(Action::Composite(actions))
-    }
-
-    /// Swap a block with its previous sibling. The first sibling is a no-op.
-    pub fn move_up(&mut self, block_id: i64) -> Result<()> {
-        let record = block_record(&self.conn, block_id)?;
-        let previous: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM block
-                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
-                 ORDER BY order_key DESC LIMIT 1",
-                params![record.page_id, record.parent_id, record.order_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(previous_id) = previous else {
-            return Ok(());
-        };
-        let previous = block_record(&self.conn, previous_id)?;
-        let before: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT order_key FROM block
-                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
-                 ORDER BY order_key DESC LIMIT 1",
-                params![record.page_id, record.parent_id, previous.order_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        self.exec(Action::SetPosition {
-            block_id,
-            page_id: record.page_id,
-            parent_id: record.parent_id,
-            order_key: key_between(before.as_deref(), Some(&previous.order_key))?,
-        })
-    }
-
-    /// Swap a block with its next sibling. The last sibling is a no-op.
-    pub fn move_down(&mut self, block_id: i64) -> Result<()> {
-        let record = block_record(&self.conn, block_id)?;
-        let next: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM block
-                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key > ?3
-                 ORDER BY order_key LIMIT 1",
-                params![record.page_id, record.parent_id, record.order_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(next_id) = next else {
-            return Ok(());
-        };
-        let next = block_record(&self.conn, next_id)?;
-        let after: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT order_key FROM block
-                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key > ?3
-                 ORDER BY order_key LIMIT 1",
-                params![record.page_id, record.parent_id, next.order_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        self.exec(Action::SetPosition {
-            block_id,
-            page_id: record.page_id,
-            parent_id: record.parent_id,
-            order_key: key_between(Some(&next.order_key), after.as_deref())?,
-        })
-    }
-
-    /// Move a block after another block, wherever that block lives.
-    pub fn move_block_after(&mut self, block_id: i64, anchor_id: i64) -> Result<()> {
-        let anchor = block_record(&self.conn, anchor_id)?;
-        self.move_block(block_id, anchor.page_id, Some(anchor_id))
-    }
-
-    /// Move a block before another block, wherever that block lives.
-    pub fn move_block_before(&mut self, block_id: i64, anchor_id: i64) -> Result<()> {
-        let anchor = block_record(&self.conn, anchor_id)?;
-        let previous: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM block
-                 WHERE page_id = ?1 AND parent_id IS ?2 AND order_key < ?3
-                 ORDER BY order_key DESC LIMIT 1",
-                params![anchor.page_id, anchor.parent_id, anchor.order_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match previous {
-            Some(previous) => self.move_block(block_id, anchor.page_id, Some(previous)),
-            None => {
-                if let Some(parent_id) = anchor.parent_id {
-                    if parent_id == block_id || is_descendant(&self.conn, parent_id, block_id)? {
-                        return Err(Error::MoveIntoSelf);
-                    }
-                }
-                self.exec(Action::SetPosition {
-                    block_id,
-                    page_id: anchor.page_id,
-                    parent_id: anchor.parent_id,
-                    order_key: key_between(None, Some(&anchor.order_key))?,
-                })
-            }
-        }
-    }
-
-    /// Move a block (with its subtree) to the end of a named page or journal day.
-    pub fn move_block_to_page(&mut self, block_id: i64, page_name: &str) -> Result<()> {
-        let page = self
-            .page_by_name(&page_key(page_name))?
-            .ok_or_else(|| Error::PageNotFound(page_name.to_string()))?;
-        self.move_block(block_id, page.id, None)
     }
 
     /// Walk the marker cycle: none → TODO → DOING → DONE → none.
@@ -2285,22 +2115,6 @@ fn apply_action(conn: &Connection, action: &Action) -> Result<Action> {
                 order_key: old_key,
             })
         }
-        Action::SetPage { block_id, page_id } => {
-            let old: i64 = conn
-                .query_row("SELECT page_id FROM block WHERE id = ?1", [block_id], |row| {
-                    row.get(0)
-                })
-                .optional()?
-                .ok_or(Error::NotFound(*block_id))?;
-            conn.execute(
-                "UPDATE block SET page_id = ?2, updated_at = ?3 WHERE id = ?1",
-                params![block_id, page_id, now()],
-            )?;
-            Ok(Action::SetPage {
-                block_id: *block_id,
-                page_id: old,
-            })
-        }
         Action::SetMarker { block_id, marker } => {
             let old: Option<String> = conn
                 .query_row("SELECT marker FROM block WHERE id = ?1", [block_id], |row| {
@@ -2474,22 +2288,6 @@ fn block_record(conn: &Connection, id: i64) -> Result<BlockRecord> {
     )
     .optional()?
     .ok_or(Error::NotFound(id))
-}
-
-fn is_descendant(conn: &Connection, candidate: i64, ancestor: i64) -> Result<bool> {
-    let mut current = Some(candidate);
-    while let Some(id) = current {
-        if id == ancestor {
-            return Ok(true);
-        }
-        current = conn
-            .query_row("SELECT parent_id FROM block WHERE id = ?1", [id], |row| {
-                row.get::<_, Option<i64>>(0)
-            })
-            .optional()?
-            .flatten();
-    }
-    Ok(false)
 }
 
 /// A block and its descendants, parents before children so they can be re-inserted in order.

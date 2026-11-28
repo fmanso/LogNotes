@@ -55,7 +55,7 @@ maker walked away from — pages have names, journals have dates, blocks have pa
 and a scheduled date. Keeping them separate keeps each table honest.
 
 **Block order is a fractional key, not an integer.** A sibling holds a sortable text key between its
-neighbours, so insert, indent, and move rewrite one row instead of renumbering the remaining siblings.
+neighbours, so insert and indent rewrite one row instead of renumbering the remaining siblings.
 The cost — key growth on repeated mid-inserts — is invisible at personal-note scale.
 
 **Links are derived, never authored.** On every block write, core extracts `[[page]]` and `#tag`
@@ -138,8 +138,7 @@ loopback-only, token-authenticated, and refuses writes while an editor has unsav
 
 ## Invariants
 
-- A block has exactly one owning page; nesting is a tree within that page and never crosses pages. A move
-  carries the whole subtree, and every descendant's page ownership follows it.
+- A block has exactly one owning page; nesting is a tree within that page and never crosses pages.
 - A page rename rewrites the explicit references in block text in the same action; deleting a page is
   refused while any block still links to it. Plain mentions are prose, not references.
 - A folded block's children are omitted from the snapshot, and folding is view state: it never enters undo.

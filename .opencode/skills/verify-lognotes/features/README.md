@@ -43,12 +43,12 @@ It then uses exactly four H2 sections in this order.
 
 ## Features
 
-- [Journal writing](./journal-writing.md) covers typing, block splits, indentation, reordering,
+- [Journal writing](./journal-writing.md) covers typing, block splits, indentation,
   undo, fences, diagrams, and the slash menu.
 - [Tasks and agenda](./tasks-and-agenda.md) covers TODO and DONE markers, scheduling, the calendar,
   and the agenda section.
 - [Pages and links](./pages-and-links.md) covers link creation, page views, references, stars,
-  rename, delete, move, and day navigation.
+  rename, delete, and day navigation.
 - [Search](./search.md) covers the quick switcher, grouped hits, opening a page or block, the full
   results view, and escape.
 - [Themes and dialogs](./themes-and-dialogs.md) covers the light and dark switch and the themed
