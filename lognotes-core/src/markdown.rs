@@ -286,6 +286,7 @@ pub struct Ink<'a> {
     pub string: &'a str,
     pub comment: &'a str,
     pub number: &'a str,
+    pub highlight: &'a str,
 }
 
 /// The same rendering for a block that is not being edited: line breaks are kept, so a fence stays a
@@ -308,7 +309,14 @@ fn render(text: &str, keep_lines: bool, colours: Option<&Ink>, mark: Option<(usi
 
     for span in &scan.spans {
         if span.start > cursor {
-            escape_into_marked(&mut html, &text[cursor..span.start], keep_lines, cursor, mark);
+            escape_into_marked(
+                &mut html,
+                &text[cursor..span.start],
+                keep_lines,
+                cursor,
+                mark,
+                colours,
+            );
         }
         if !span.style.contains(Style::DIM) {
             let href = scan
@@ -327,6 +335,7 @@ fn render(text: &str, keep_lines: bool, colours: Option<&Ink>, mark: Option<(usi
                     keep_lines,
                     span.start,
                     mark,
+                    colours,
                 ),
             }
             close_tags(&mut html, span.style);
@@ -335,7 +344,7 @@ fn render(text: &str, keep_lines: bool, colours: Option<&Ink>, mark: Option<(usi
     }
 
     if cursor < text.len() {
-        escape_into_marked(&mut html, &text[cursor..], keep_lines, cursor, mark);
+        escape_into_marked(&mut html, &text[cursor..], keep_lines, cursor, mark, colours);
     }
 
     if keep_lines {
@@ -453,6 +462,7 @@ fn escape_into_marked(
     keep_lines: bool,
     offset: usize,
     mark: Option<(usize, usize)>,
+    colours: Option<&Ink>,
 ) {
     let Some((start, end)) = mark else {
         return escape_into(html, text, keep_lines);
@@ -463,8 +473,11 @@ fn escape_into_marked(
         return escape_into(html, text, keep_lines);
     }
 
+    let highlight = colours.map(|c| c.highlight).unwrap_or("#f3e6c8");
     escape_into(html, &text[..from - offset], keep_lines);
-    html.push_str("<span style=\"background-color:#f3e6c8\">");
+    html.push_str("<span style=\"background-color:");
+    html.push_str(highlight);
+    html.push_str("\">");
     escape_into(html, &text[from - offset..to - offset], keep_lines);
     html.push_str("</span>");
     escape_into(html, &text[to - offset..], keep_lines);
@@ -757,6 +770,7 @@ mod tests {
         string: "#s",
         comment: "#c",
         number: "#n",
+        highlight: "#f3e6c8",
     };
 
     fn styles(text: &str) -> Vec<(String, Style)> {

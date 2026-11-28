@@ -49,10 +49,15 @@ ApplicationWindow {
         readonly property color textGhost: root.darkTheme ? "#8f8a80" : "#a39c90"
         readonly property color hover: root.darkTheme ? "#26292d" : "#ece7de"
         readonly property color accent: root.darkTheme ? "#8fb6e8" : "#3a6ea5"
+        readonly property color accentBg: root.darkTheme ? "#253347" : "#e8eff7"
         readonly property color danger: root.darkTheme ? "#e0948a" : "#a4443c"
+        readonly property color dangerBg: root.darkTheme ? "#3d2624" : "#f7e6e4"
         readonly property color dangerText: root.darkTheme ? "#e8b0a8" : "#7a3a3a"
         readonly property color success: root.darkTheme ? "#8fc79c" : "#4a7c59"
+        readonly property color successBg: root.darkTheme ? "#223829" : "#e4f0e7"
         readonly property color warning: root.darkTheme ? "#d8b076" : "#b07d3a"
+        readonly property color warningBg: root.darkTheme ? "#3b3020" : "#f5ebd9"
+        readonly property color chipBg: root.darkTheme ? "#25282c" : "#eeeae2"
         readonly property color markerIdle: root.darkTheme ? "#3a3f45" : "#e4e0d8"
         readonly property color scrim: root.darkTheme ? "#000000" : "#3c3223"
         readonly property color onMarker: "#ffffff"
@@ -233,11 +238,17 @@ ApplicationWindow {
     property int emptyPulls: 0
 
     // Reaching a page, wherever the click came from: the sidebar, a link, a search hit.
+    property string activePage: ""
+
     function openPage(name) {
+        root.settingsOpen = false
         root.closeSlash()
         root.closeLinkMenu()
         root.pendingTerm = ""
+        root.searchOpen = false
+        searchField.text = ""
         searchField.focus = false
+        root.activePage = name
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -252,7 +263,10 @@ ApplicationWindow {
         root.closeSlash()
         root.closeLinkMenu()
         root.pendingTerm = ""
+        root.searchOpen = false
+        searchField.text = ""
         searchField.focus = false
+        root.activePage = ""
         root.emptyPulls = 0
         root.editingRow = -1
         root.unlinkedExpanded = false
@@ -277,16 +291,35 @@ ApplicationWindow {
     // control style's default dark chrome (which read as a different application on a cream page).
     component QuietButton: Button {
         id: control
+        property string variant: "default"
         opacity: enabled ? 1 : 0.45
+        leftPadding: 12
+        rightPadding: 12
+        topPadding: 6
+        bottomPadding: 6
+        implicitHeight: Math.max(28, contentItem.implicitHeight + topPadding + bottomPadding)
         background: Rectangle {
-            color: control.hovered ? theme.hover : "transparent"
-            border.color: theme.border
+            color: control.variant === "primary"
+                   ? (control.hovered ? Qt.darker(theme.accent, 1.08) : theme.accent)
+                   : (control.variant === "danger"
+                      ? (control.hovered ? theme.danger : theme.dangerBg)
+                      : (control.variant === "active"
+                         ? theme.hover
+                         : (control.hovered ? theme.hover : "transparent")))
+            border.color: control.variant === "primary" || control.variant === "active"
+                          ? theme.accent
+                          : (control.variant === "danger" ? theme.danger : theme.border)
             radius: 6
         }
         contentItem: Label {
             text: control.text
-            color: theme.text
+            color: control.variant === "primary"
+                   ? theme.page
+                   : (control.variant === "danger"
+                      ? (control.hovered ? theme.page : theme.danger)
+                      : theme.text)
             font.pixelSize: 13
+            font.bold: control.variant === "primary" || control.variant === "danger" || control.variant === "active"
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
@@ -299,7 +332,10 @@ ApplicationWindow {
         id: control
         anchors.centerIn: Overlay.overlay
         modal: true
-        padding: 12
+        topPadding: 8
+        bottomPadding: 14
+        leftPadding: 14
+        rightPadding: 14
 
         background: Rectangle {
             color: theme.page
@@ -313,10 +349,10 @@ ApplicationWindow {
             color: theme.text
             font.pixelSize: 14
             font.bold: true
-            topPadding: 8
-            bottomPadding: 0
-            leftPadding: 12
-            rightPadding: 12
+            topPadding: 12
+            bottomPadding: 4
+            leftPadding: 14
+            rightPadding: 14
         }
 
         Overlay.modal: Rectangle {
@@ -1175,12 +1211,24 @@ ApplicationWindow {
         anchors.centerIn: Overlay.overlay
         modal: true
         focus: true
-        padding: 12
+        padding: 14
 
         background: Rectangle {
             color: theme.page
             border.color: theme.border
             radius: 8
+        }
+
+        function sameDay(a, b) {
+            return a.getFullYear() === b.getFullYear()
+                    && a.getMonth() === b.getMonth()
+                    && a.getDate() === b.getDate()
+        }
+
+        function cellDate(index) {
+            const first = new Date(monthAnchor.getFullYear(), monthAnchor.getMonth(), 1)
+            const offset = first.getDay()
+            return new Date(first.getFullYear(), first.getMonth(), 1 - offset + index)
         }
 
         function openFor(rowIndex, why) {
@@ -1209,7 +1257,7 @@ ApplicationWindow {
             const iso = Qt.formatDate(picked, "yyyy-MM-dd")
             if (purpose === "open") {
                 close()
-                journal.open_page(iso)
+                root.openPage(iso)
                 return
             }
             const pending = root.slashPending
@@ -1251,7 +1299,8 @@ ApplicationWindow {
             id: popupContent
             objectName: "datePopupContent"
             focus: true
-            spacing: 8
+            spacing: 10
+            width: 252
 
             Keys.onPressed: (event) => {
                 if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -1276,47 +1325,118 @@ ApplicationWindow {
             }
 
             Row {
+                width: parent.width
                 spacing: 6
 
                 QuietButton {
                     text: "\u2039"
+                    width: 28
+                    height: 28
+                    leftPadding: 0
+                    rightPadding: 0
                     onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
                                                               datePopup.monthAnchor.getMonth() - 1, 1)
                 }
 
                 Label {
                     text: Qt.formatDate(datePopup.monthAnchor, "MMMM yyyy")
-                    width: 150
+                    width: parent.width - 68
                     horizontalAlignment: Text.AlignHCenter
                     anchors.verticalCenter: parent.verticalCenter
                     color: theme.text
+                    font.pixelSize: 13
+                    font.bold: true
                 }
 
                 QuietButton {
                     text: "\u203a"
+                    width: 28
+                    height: 28
+                    leftPadding: 0
+                    rightPadding: 0
                     onClicked: datePopup.monthAnchor = new Date(datePopup.monthAnchor.getFullYear(),
                                                               datePopup.monthAnchor.getMonth() + 1, 1)
                 }
             }
 
-            DayOfWeekRow {
-                locale: grid.locale
+            Row {
+                width: parent.width
+                Repeater {
+                    model: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                    delegate: Label {
+                        width: 36
+                        height: 22
+                        text: modelData
+                        color: theme.textFaint
+                        font.pixelSize: 11
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
             }
 
-            MonthGrid {
-                id: grid
-                month: datePopup.monthAnchor
-                onClicked: (pickedDay) => datePopup.picked = new Date(pickedDay)
+            Grid {
+                columns: 7
+                width: parent.width
+
+                Repeater {
+                    model: 42
+                    delegate: Rectangle {
+                        id: dayCell
+                        width: 36
+                        height: 32
+                        radius: 6
+                        property date day: datePopup.cellDate(index)
+                        property bool inMonth: day.getMonth() === datePopup.monthAnchor.getMonth()
+                        property bool isPicked: datePopup.sameDay(day, datePopup.picked)
+                        property bool isToday: datePopup.sameDay(day, new Date())
+                        property bool hovered: false
+
+                        color: isPicked ? theme.accent : (hovered ? theme.hover : "transparent")
+                        border.color: isToday && !isPicked ? theme.accent : "transparent"
+                        border.width: isToday && !isPicked ? 1 : 0
+
+                        Label {
+                            anchors.centerIn: parent
+                            text: dayCell.day.getDate()
+                            color: dayCell.isPicked
+                                   ? theme.page
+                                   : (dayCell.inMonth ? theme.text : theme.textGhost)
+                            font.pixelSize: 13
+                            font.bold: dayCell.isPicked || dayCell.isToday
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onEntered: dayCell.hovered = true
+                            onExited: dayCell.hovered = false
+                            onClicked: {
+                                datePopup.picked = dayCell.day
+                                datePopup.monthAnchor = new Date(dayCell.day.getFullYear(),
+                                                                 dayCell.day.getMonth(), 1)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
             }
 
             Label {
-                text: qsTr("Picked: %1").arg(Qt.formatDate(datePopup.picked, "ddd, MMM d"))
+                text: qsTr("Picked: %1").arg(Qt.formatDate(datePopup.picked, "ddd, MMM d, yyyy"))
                 color: theme.textMuted
                 font.pixelSize: 12
             }
 
             Row {
-                spacing: 8
+                spacing: 6
                 anchors.right: parent.right
 
                 QuietButton {
@@ -1353,6 +1473,7 @@ ApplicationWindow {
 
                 QuietButton {
                     text: qsTr("OK")
+                    variant: "primary"
                     onClicked: datePopup.accept()
                 }
             }
@@ -1397,18 +1518,25 @@ ApplicationWindow {
             QuietButton {
                 objectName: "journalButton"
                 text: qsTr("Journal")
+                height: 28
+                variant: (journal.view === "journal" && !root.settingsOpen) ? "active" : "default"
                 onClicked: root.goJournal()
             }
 
             QuietButton {
                 objectName: "dateButton"
                 text: qsTr("Date")
+                height: 28
                 onClicked: datePopup.openFor(-1, "open")
             }
 
             QuietButton {
                 objectName: "sidebarButton"
                 text: root.sidebarOpen ? qsTr("\u2039") : qsTr("\u203a")
+                width: 28
+                height: 28
+                leftPadding: 0
+                rightPadding: 0
                 onClicked: root.sidebarOpen = !root.sidebarOpen
             }
 
@@ -1417,12 +1545,18 @@ ApplicationWindow {
             QuietButton {
                 objectName: "settingsButton"
                 text: qsTr("Settings")
+                height: 28
+                variant: root.settingsOpen ? "active" : "default"
                 onClicked: root.openSettings()
             }
 
             QuietButton {
                 objectName: "themeButton"
                 text: root.darkTheme ? qsTr("\u2600") : qsTr("\u263e")
+                width: 28
+                height: 28
+                leftPadding: 0
+                rightPadding: 0
                 onClicked: journal.apply_theme(root.darkTheme ? "light" : "dark")
             }
         }
@@ -1523,6 +1657,17 @@ ApplicationWindow {
                 spacing: 2
 
                 Label {
+                    visible: root.sidebarFavourites.length === 0 && root.sidebarRecent.length === 0
+                    width: parent.width - 12
+                    x: 6
+                    topPadding: 6
+                    text: qsTr("Pages you open or star will appear here.")
+                    color: theme.textGhost
+                    font.pixelSize: 11
+                    wrapMode: Text.WordWrap
+                }
+
+                Label {
                     visible: root.sidebarFavourites.length > 0
                     text: qsTr("Favourites")
                     color: theme.textGhost
@@ -1542,11 +1687,23 @@ ApplicationWindow {
                         width: sidebarColumn.width
                         height: 26
                         property bool hovered: false
+                        property bool isActive: journal.view === "page" && !root.settingsOpen
+                                                && root.activePage.toLowerCase() === modelData.toLowerCase()
 
                         Rectangle {
                             anchors.fill: parent
                             radius: 5
-                            color: parent.hovered ? theme.hover : "transparent"
+                            color: parent.isActive || parent.hovered ? theme.hover : "transparent"
+                        }
+
+                        Rectangle {
+                            visible: parent.isActive
+                            width: 2
+                            height: 14
+                            radius: 1
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: theme.accent
                         }
 
                         Label {
@@ -1567,12 +1724,14 @@ ApplicationWindow {
                             text: modelData
                             color: theme.text
                             font.pixelSize: 12
+                            font.bold: parent.isActive
                             elide: Text.ElideRight
                         }
 
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
                             onEntered: parent.hovered = true
                             onExited: parent.hovered = false
                             onClicked: root.openPage(modelData)
@@ -1600,28 +1759,42 @@ ApplicationWindow {
                         width: sidebarColumn.width
                         height: 26
                         property bool hovered: false
+                        property bool isActive: journal.view === "page" && !root.settingsOpen
+                                                && root.activePage.toLowerCase() === modelData.toLowerCase()
 
                         Rectangle {
                             anchors.fill: parent
                             radius: 5
-                            color: parent.hovered ? theme.hover : "transparent"
+                            color: parent.isActive || parent.hovered ? theme.hover : "transparent"
+                        }
+
+                        Rectangle {
+                            visible: parent.isActive
+                            width: 2
+                            height: 14
+                            radius: 1
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: theme.accent
                         }
 
                         Label {
                             anchors.left: parent.left
-                            anchors.leftMargin: 6
+                            anchors.leftMargin: 8
                             anchors.right: parent.right
                             anchors.rightMargin: 6
                             anchors.verticalCenter: parent.verticalCenter
                             text: modelData
                             color: theme.text
                             font.pixelSize: 12
+                            font.bold: parent.isActive
                             elide: Text.ElideRight
                         }
 
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
                             onEntered: parent.hovered = true
                             onExited: parent.hovered = false
                             onClicked: root.openPage(modelData)
@@ -1705,6 +1878,9 @@ ApplicationWindow {
                             anchors.leftMargin: 14
                             anchors.right: hitWhere.left
                             anchors.rightMargin: 10
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            clip: true
                             // A block hit is already rendered from the scan; a page name is a plain name.
                             text: model.title
                             textFormat: model.kind === "block" ? Text.RichText : Text.PlainText
@@ -1825,30 +2001,55 @@ ApplicationWindow {
             }
 
             // A date heading, or the "Scheduled" section heading.
+            Rectangle {
+                visible: rowItem.isHeading && index > 0
+                anchors.top: parent.top
+                anchors.topMargin: 6
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
             Label {
                 id: sectionHeading
-                objectName: kind === "page-header" ? "pageHeading"
-                           : (kind === "unlinked-header" ? "unlinkedToggle" : "")
+                objectName: model.kind === "page-header" ? "pageHeading"
+                           : (model.kind === "unlinked-header" ? "unlinkedToggle" : "")
                 visible: rowItem.isHeading
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 4
-                anchors.right: kind === "page-header" ? pageMenuButton.left : parent.right
-                anchors.rightMargin: kind === "page-header" ? 8 : 0
-                text: (kind === "heading" || (kind === "page-header" && model.date !== ""))
+                anchors.right: (journal.view === "page" && model.kind === "page-header" && model.date === "")
+                               ? pageMenuButton.left : parent.right
+                anchors.rightMargin: (journal.view === "page" && model.kind === "page-header" && model.date === "")
+                                     ? 8 : 0
+                text: (model.kind === "heading" || (model.kind === "page-header" && model.date !== ""))
                       ? Qt.formatDate(new Date(model.date + "T12:00:00"), "dddd, MMMM d, yyyy")
-                      : model.text
-                color: kind === "page-header" ? theme.text : theme.textMuted
+                      : (model.kind === "unlinked-header"
+                         ? (root.unlinkedExpanded ? "▾ " : "▸ ") + model.text
+                         : model.text)
+                color: model.kind === "page-header" ? theme.text : theme.textMuted
                 font.family: root.noteFont
-                font.pixelSize: kind === "heading" ? 15 : (kind === "page-header" ? 22 : 13)
+                font.pixelSize: model.kind === "heading" ? 15 : (model.kind === "page-header" ? 22 : 12)
                 font.bold: true
-                font.capitalization: (kind === "heading" || kind === "page-header")
+                font.capitalization: (model.kind === "heading" || model.kind === "page-header")
                                      ? Font.MixedCase : Font.AllUppercase
+
+                Component.onCompleted: {
+                    if (journal.view === "page" && model.kind === "page-header") {
+                        root.activePage = model.text
+                    }
+                }
+                onTextChanged: {
+                    if (journal.view === "page" && model.kind === "page-header") {
+                        root.activePage = model.text
+                    }
+                }
 
                 // The mentions group is the one heading you can click.
                 MouseArea {
                     anchors.fill: parent
-                    enabled: kind === "unlinked-header"
+                    enabled: model.kind === "unlinked-header"
+                    cursorShape: model.kind === "unlinked-header" ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: root.unlinkedExpanded = !root.unlinkedExpanded
                 }
             }
@@ -1860,7 +2061,7 @@ ApplicationWindow {
                 objectName: "favouriteStar"
                 // A journal day carries a date in that role, and never takes a star: the sidebar lists
                 // named pages, so a star there would lead nowhere.
-                visible: kind === "page-header" && model.date === ""
+                visible: journal.view === "page" && model.kind === "page-header" && model.date === ""
                 width: 32
                 height: 32
                 anchors.right: parent.right
@@ -1876,6 +2077,7 @@ ApplicationWindow {
 
                 MouseArea {
                     anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: journal.toggle_favourite(model.text, !journal.page_favourite)
                 }
             }
@@ -1883,11 +2085,12 @@ ApplicationWindow {
             QuietButton {
                 id: pageMenuButton
                 objectName: "pageMenuButton"
-                visible: kind === "page-header" && model.date === ""
+                visible: journal.view === "page" && model.kind === "page-header" && model.date === ""
                 text: qsTr("…")
+                height: 28
                 anchors.right: favouriteStar.left
                 anchors.bottom: sectionHeading.bottom
-                anchors.bottomMargin: -6
+                anchors.bottomMargin: -4
                 onClicked: {
                     root.pageActionName = model.text
                     pageMenu.open()
@@ -1952,6 +2155,17 @@ ApplicationWindow {
                     height: 1
                 }
 
+                Repeater {
+                    model: rowItem.isBlock ? model.depth : 0
+                    delegate: Rectangle {
+                        x: (index + 1) * 24 + 10
+                        y: -2
+                        width: 1
+                        height: blockRow.height + 4
+                        color: theme.rule
+                    }
+                }
+
                 Item {
                     id: foldButton
                     objectName: "foldButton"
@@ -1973,6 +2187,16 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.toggleFold(index, model.depth, model.collapsed)
                     }
+                }
+
+                Rectangle {
+                    visible: rowItem.isBlock && model.marker === "" && !rowItem.hovered && !editor.activeFocus
+                    x: indentSpacer.width + 8.5
+                    width: 5
+                    height: 5
+                    radius: 2.5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: model.collapsed ? theme.accent : theme.textGhost
                 }
 
                 // The marker box is both the affordance and the state.
@@ -2002,6 +2226,7 @@ ApplicationWindow {
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton
+                        cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root.rebuilding = true
                             if (rowItem.isAgenda) {
@@ -2014,34 +2239,54 @@ ApplicationWindow {
                     }
                 }
 
-                Label {
-                    id: markerLabel
-                    x: markerBox.x + markerBox.width + 4
+                Rectangle {
+                    id: markerBadge
                     visible: model.marker !== ""
-                    text: model.marker
-                    color: root.markerColour(model.marker)
-                    font.pixelSize: 11
-                    font.bold: true
+                    x: markerBox.x + markerBox.width + 5
+                    width: markerLabel.implicitWidth + 10
+                    height: 18
+                    radius: 4
                     anchors.verticalCenter: parent.verticalCenter
+                    color: model.marker === "TODO"
+                           ? theme.warningBg
+                           : (model.marker === "DOING" ? theme.accentBg : theme.successBg)
+
+                    Label {
+                        id: markerLabel
+                        anchors.centerIn: parent
+                        text: model.marker
+                        color: root.markerColour(model.marker)
+                        font.pixelSize: 10
+                        font.bold: true
+                    }
                 }
 
-                Label {
-                    id: scheduledChip
+                Rectangle {
+                    id: scheduledChipBox
                     visible: !rowItem.isAgenda && model.scheduled !== ""
-                    text: formatDay(model.scheduled)
-                    color: model.overdue ? theme.danger : theme.textFaint
-                    font.pixelSize: 12
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
+                    width: scheduledChip.implicitWidth + 12
+                    height: 20
+                    radius: 4
+                    color: model.overdue ? theme.dangerBg : theme.chipBg
+
+                    Label {
+                        id: scheduledChip
+                        anchors.centerIn: parent
+                        text: formatDay(model.scheduled)
+                        color: model.overdue ? theme.danger : theme.textFaint
+                        font.pixelSize: 11
+                    }
                 }
 
                 TextEdit {
                     id: editor
                     objectName: "blockEditor"
                     visible: rowItem.isBlock && (rowItem.editing || model.text === "")
-                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.left: markerBadge.visible ? markerBadge.right : markerBox.right
                     anchors.leftMargin: 8
-                    anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
+                    anchors.right: scheduledChipBox.visible ? scheduledChipBox.left : parent.right
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.text
@@ -2202,7 +2447,7 @@ ApplicationWindow {
                                 event.accepted = true
                                 return
                             }
-                                                } else if ((event.key === Qt.Key_Up || event.key === Qt.Key_Down)
+                        } else if ((event.key === Qt.Key_Up || event.key === Qt.Key_Down)
                                    && (event.modifiers
                                        & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) === 0
                                    && editor.selectedText.length === 0) {
@@ -2321,9 +2566,9 @@ ApplicationWindow {
                     text: model.html
                     readOnly: true
                     selectByMouse: false
-                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.left: markerBadge.visible ? markerBadge.right : markerBox.right
                     anchors.leftMargin: 8
-                    anchors.right: scheduledChip.visible ? scheduledChip.left : parent.right
+                    anchors.right: scheduledChipBox.visible ? scheduledChipBox.left : parent.right
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     color: model.marker === "DONE" ? theme.textFaint : theme.text
@@ -2357,11 +2602,14 @@ ApplicationWindow {
                     id: agendaText
                     objectName: "summaryRow"
                     visible: rowItem.isAgenda || rowItem.isReference || rowItem.isResultPage
-                    anchors.left: markerLabel.visible ? markerLabel.right : markerBox.right
+                    anchors.left: markerBadge.visible ? markerBadge.right : markerBox.right
                     anchors.leftMargin: 8
-                    anchors.right: sourceLabel.left
-                    anchors.rightMargin: 8
+                    anchors.right: sourceLabel.visible ? sourceLabel.left : parent.right
+                    anchors.rightMargin: sourceLabel.visible ? 10 : 8
                     anchors.verticalCenter: parent.verticalCenter
+                    height: parent.height
+                    verticalAlignment: Text.AlignVCenter
+                    clip: true
                     // Summary rows are not edited, so they show the finished text: marks dropped and
                     // links live.
                     text: model.html === "" ? qsTr("(empty block)") : model.html
@@ -2387,6 +2635,14 @@ ApplicationWindow {
                     visible: rowItem.isAgenda || rowItem.isReference
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
+                    leftPadding: 6
+                    rightPadding: 6
+                    topPadding: 2
+                    bottomPadding: 2
+                    background: Rectangle {
+                        radius: 4
+                        color: model.overdue ? theme.dangerBg : theme.chipBg
+                    }
                     text: {
                         if (rowItem.isReference) {
                             const isDate = /^\d{4}-\d{2}-\d{2}$/.test(model.source)
@@ -2403,7 +2659,7 @@ ApplicationWindow {
                         return day + " · from " + (isDate ? formatDay(model.source) : model.source)
                     }
                     color: model.overdue ? theme.danger : theme.textFaint
-                    font.pixelSize: 12
+                    font.pixelSize: 11
 
                 }
 
@@ -2432,18 +2688,27 @@ ApplicationWindow {
                 anchors.right: blockRow.right
                 spacing: 6
 
-                Image {
-                    objectName: "diagram"
+                Rectangle {
                     visible: model.diagram !== ""
-                    source: model.diagram
-                    // Never blow a small diagram up to the column's width; only the wide ones shrink,
-                    // and a very tall one is capped so it cannot swallow the page.
-                    width: Math.min(implicitWidth, diagramArea.width)
-                    height: implicitWidth > 0
-                            ? Math.min(width * implicitHeight / implicitWidth, 420)
-                            : 0
-                    fillMode: Image.PreserveAspectFit
-                    asynchronous: true
+                    width: Math.min(diagramImg.implicitWidth + 16, diagramArea.width)
+                    height: diagramImg.height + 16
+                    color: theme.panel
+                    border.color: theme.rule
+                    radius: 6
+
+                    Image {
+                        id: diagramImg
+                        objectName: "diagram"
+                        visible: model.diagram !== ""
+                        anchors.centerIn: parent
+                        source: model.diagram
+                        width: Math.min(implicitWidth, Math.max(0, diagramArea.width - 16))
+                        height: implicitWidth > 0
+                                ? Math.min(width * implicitHeight / implicitWidth, 420)
+                                : 0
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                    }
                 }
 
                 Label {
@@ -2453,7 +2718,16 @@ ApplicationWindow {
                     color: theme.danger
                     font.pixelSize: 12
                     width: parent.width
+                    leftPadding: 10
+                    rightPadding: 10
+                    topPadding: 6
+                    bottomPadding: 6
                     wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                    background: Rectangle {
+                        color: theme.dangerBg
+                        border.color: theme.danger
+                        radius: 6
+                    }
                 }
             }
         }
@@ -2528,11 +2802,20 @@ ApplicationWindow {
         visible: journal.ready && journal.error === "" && journal.note !== "" && !root.settingsOpen
         anchors.bottom: parent.bottom
         anchors.right: parent.right
-        anchors.margins: 12
+        anchors.margins: 14
+        leftPadding: 12
+        rightPadding: 12
+        topPadding: 8
+        bottomPadding: 8
         text: journal.note
-        color: theme.textFaint
+        color: theme.textMuted
         font.pixelSize: 12
         wrapMode: Text.WordWrap
+        background: Rectangle {
+            color: theme.panel
+            border.color: theme.border
+            radius: 6
+        }
     }
 
     // ---- the settings page ----------------------------------------------------------------
@@ -2863,42 +3146,61 @@ ApplicationWindow {
     ThemedDialog {
         id: importModeChooser
         objectName: "importModeChooser"
-        width: 424
+        width: 440
         title: qsTr("How should this folder be imported?")
 
-        contentItem: Label {
-            width: 400
-            text: qsTr("Merge replaces the pages and days this folder names and leaves the rest alone. Replace all clears every block first, so pages the folder does not name become empty.")
-            color: theme.text
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
+        contentItem: Column {
+            width: 412
+            spacing: 12
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
-
-            QuietButton {
-                objectName: "importCancel"
-                text: qsTr("Cancel")
-                onClicked: importModeChooser.close()
+            Label {
+                width: parent.width
+                text: qsTr("Merge replaces the pages and days this folder names and leaves the rest alone. Replace all clears every block first, so pages the folder does not name become empty.")
+                color: theme.text
+                font.pixelSize: 13
+                wrapMode: Text.WordWrap
             }
 
-            QuietButton {
-                objectName: "importMerge"
-                text: qsTr("Merge")
-                onClicked: {
-                    importModeChooser.close()
-                    journal.import_from(root.pendingImport)
-                }
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
             }
 
-            QuietButton {
-                objectName: "importReplaceAll"
-                text: qsTr("Replace all")
-                onClicked: {
-                    importModeChooser.close()
-                    journal.import_replace_all(root.pendingImport)
+            Item {
+                width: parent.width
+                height: 32
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "importCancel"
+                        text: qsTr("Cancel")
+                        onClicked: importModeChooser.close()
+                    }
+
+                    QuietButton {
+                        objectName: "importReplaceAll"
+                        text: qsTr("Replace all")
+                        variant: "danger"
+                        onClicked: {
+                            importModeChooser.close()
+                            journal.import_replace_all(root.pendingImport)
+                        }
+                    }
+
+                    QuietButton {
+                        objectName: "importMerge"
+                        text: qsTr("Merge")
+                        variant: "primary"
+                        onClicked: {
+                            importModeChooser.close()
+                            journal.import_from(root.pendingImport)
+                        }
+                    }
                 }
             }
         }
@@ -3119,7 +3421,7 @@ ApplicationWindow {
 
             Item {
                 width: parent.width
-                height: 40
+                height: 32
 
                 Label {
                     anchors.left: parent.left
@@ -3137,21 +3439,14 @@ ApplicationWindow {
                     QuietButton {
                         objectName: "cancelFont"
                         text: qsTr("Cancel")
-                        leftPadding: 16
-                        rightPadding: 16
-                        topPadding: 8
-                        bottomPadding: 8
                         onClicked: fontDialog.close()
                     }
 
                     QuietButton {
                         objectName: "applyFont"
                         text: qsTr("Apply")
+                        variant: "primary"
                         enabled: fontList.currentIndex >= 0
-                        leftPadding: 16
-                        rightPadding: 16
-                        topPadding: 8
-                        bottomPadding: 8
                         onClicked: root.applyFont()
                     }
                 }
@@ -3161,6 +3456,7 @@ ApplicationWindow {
 
     ThemedDialog {
         id: renamePageDialog
+        width: 408
         title: qsTr("Rename page")
 
         function submit() {
@@ -3174,29 +3470,55 @@ ApplicationWindow {
             renamePageField.selectAll()
         }
 
-        contentItem: QuietField {
-            id: renamePageField
-            objectName: "renamePageField"
+        contentItem: Column {
             width: 380
-            selectByMouse: true
-            onAccepted: renamePageDialog.submit()
-            Keys.onEscapePressed: renamePageDialog.close()
-        }
+            spacing: 12
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
-
-            QuietButton {
-                objectName: "cancelRenamePage"
-                text: qsTr("Cancel")
-                onClicked: renamePageDialog.close()
+            QuietField {
+                id: renamePageField
+                objectName: "renamePageField"
+                width: parent.width
+                selectByMouse: true
+                onAccepted: renamePageDialog.submit()
+                Keys.onEscapePressed: renamePageDialog.close()
             }
 
-            QuietButton {
-                objectName: "confirmRenamePage"
-                text: qsTr("Rename")
-                onClicked: renamePageDialog.submit()
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
+            Item {
+                width: parent.width
+                height: 32
+
+                Label {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Enter renames. Esc cancels.")
+                    color: theme.textGhost
+                    font.pixelSize: 11
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "cancelRenamePage"
+                        text: qsTr("Cancel")
+                        onClicked: renamePageDialog.close()
+                    }
+
+                    QuietButton {
+                        objectName: "confirmRenamePage"
+                        text: qsTr("Rename")
+                        variant: "primary"
+                        onClicked: renamePageDialog.submit()
+                    }
+                }
             }
         }
     }
@@ -3204,38 +3526,56 @@ ApplicationWindow {
     ThemedDialog {
         id: deletePageDialog
         objectName: "deletePageDialog"
-        width: 424
+        width: 428
         title: qsTr("Delete page?")
 
-        contentItem: Label {
+        contentItem: Column {
             width: 400
-            text: journal.page_linked > 0
-                  ? qsTr("This page still has %1 linked references. Remove them before deleting it.")
-                    .arg(journal.page_linked)
-                  : qsTr("Delete %1 and its blocks? This can be undone.")
-                    .arg(root.pageActionName)
-            color: theme.text
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
+            spacing: 12
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
-
-            QuietButton {
-                objectName: "cancelDeletePage"
-                text: qsTr("Cancel")
-                onClicked: deletePageDialog.close()
+            Label {
+                width: parent.width
+                text: journal.page_linked > 0
+                      ? qsTr("This page still has %1 linked references. Remove them before deleting it.")
+                        .arg(journal.page_linked)
+                      : qsTr("Delete %1 and its blocks? This can be undone.")
+                        .arg(root.pageActionName)
+                color: theme.text
+                font.pixelSize: 13
+                wrapMode: Text.WordWrap
             }
 
-            QuietButton {
-                objectName: "confirmDeletePage"
-                text: qsTr("Delete")
-                enabled: journal.page_linked === 0
-                onClicked: {
-                    deletePageDialog.close()
-                    journal.delete_page()
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
+            Item {
+                width: parent.width
+                height: 32
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "cancelDeletePage"
+                        text: qsTr("Cancel")
+                        onClicked: deletePageDialog.close()
+                    }
+
+                    QuietButton {
+                        objectName: "confirmDeletePage"
+                        text: qsTr("Delete")
+                        variant: "danger"
+                        enabled: journal.page_linked === 0
+                        onClicked: {
+                            deletePageDialog.close()
+                            journal.delete_page()
+                        }
+                    }
                 }
             }
         }
@@ -3244,34 +3584,52 @@ ApplicationWindow {
     ThemedDialog {
         id: confirmRestore
         objectName: "confirmRestore"
-        width: 404
+        width: 408
         title: qsTr("Restore this backup?")
 
-        contentItem: Label {
+        contentItem: Column {
             width: 380
-            text: qsTr("The notes now open will be replaced by %1. The current database is kept in the backups folder first.")
-                  .arg(root.pendingRestoreName)
-            color: theme.text
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
+            spacing: 12
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
-
-            QuietButton {
-                objectName: "cancelRestore"
-                text: qsTr("Cancel")
-                onClicked: confirmRestore.close()
+            Label {
+                width: parent.width
+                text: qsTr("The notes now open will be replaced by %1. The current database is kept in the backups folder first.")
+                      .arg(root.pendingRestoreName)
+                color: theme.text
+                font.pixelSize: 13
+                wrapMode: Text.WordWrap
             }
 
-            QuietButton {
-                objectName: "confirmRestore"
-                text: qsTr("Restore")
-                onClicked: {
-                    confirmRestore.close()
-                    journal.restore_backup(root.pendingRestore)
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
+            Item {
+                width: parent.width
+                height: 32
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "cancelRestore"
+                        text: qsTr("Cancel")
+                        onClicked: confirmRestore.close()
+                    }
+
+                    QuietButton {
+                        objectName: "confirmRestore"
+                        text: qsTr("Restore")
+                        variant: "danger"
+                        onClicked: {
+                            confirmRestore.close()
+                            journal.restore_backup(root.pendingRestore)
+                        }
+                    }
                 }
             }
         }
@@ -3280,33 +3638,51 @@ ApplicationWindow {
     ThemedDialog {
         id: confirmReplace
         objectName: "confirmReplace"
-        width: 384
+        width: 408
         title: qsTr("Replace notes in that folder?")
 
-        contentItem: Label {
-            width: 360
-            text: qsTr("That folder already holds notes with the same kind of names. Exporting will replace them.")
-            color: theme.text
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
+        contentItem: Column {
+            width: 380
+            spacing: 12
 
-        footer: Row {
-            spacing: 8
-            anchors.right: parent.right
-
-            QuietButton {
-                objectName: "cancelExport"
-                text: qsTr("Cancel")
-                onClicked: confirmReplace.close()
+            Label {
+                width: parent.width
+                text: qsTr("That folder already holds notes with the same kind of names. Exporting will replace them.")
+                color: theme.text
+                font.pixelSize: 13
+                wrapMode: Text.WordWrap
             }
 
-            QuietButton {
-                objectName: "confirmExport"
-                text: qsTr("Export anyway")
-                onClicked: {
-                    confirmReplace.close()
-                    journal.export_to(root.pendingExport)
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: theme.rule
+            }
+
+            Item {
+                width: parent.width
+                height: 32
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    QuietButton {
+                        objectName: "cancelExport"
+                        text: qsTr("Cancel")
+                        onClicked: confirmReplace.close()
+                    }
+
+                    QuietButton {
+                        objectName: "confirmExport"
+                        text: qsTr("Export anyway")
+                        variant: "primary"
+                        onClicked: {
+                            confirmReplace.close()
+                            journal.export_to(root.pendingExport)
+                        }
+                    }
                 }
             }
         }

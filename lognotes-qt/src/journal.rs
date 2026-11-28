@@ -70,6 +70,7 @@ const INK_LIGHT: markdown::Ink<'_> = markdown::Ink {
     string: "#4a7c59",
     comment: "#a39c90",
     number: "#a4443c",
+    highlight: "#f3e6c8",
 };
 
 const INK_DARK: markdown::Ink<'_> = markdown::Ink {
@@ -78,6 +79,7 @@ const INK_DARK: markdown::Ink<'_> = markdown::Ink {
     string: "#8fc79c",
     comment: "#8f8a80",
     number: "#e0948a",
+    highlight: "#4a3f28",
 };
 
 fn ink(theme: &str) -> &'static markdown::Ink<'static> {
@@ -1310,7 +1312,6 @@ impl qobject::Journal {
                 rust.can_undo = outcome.can_undo;
                 rust.can_redo = outcome.can_redo;
                 drop(rust);
-                self.as_mut().end_reset_model();
                 self.as_mut().set_error(QString::from(""));
                 self.as_mut().set_ready(true);
                 self.as_mut().set_can_undo(outcome.can_undo);
@@ -1332,6 +1333,7 @@ impl qobject::Journal {
                 self.as_mut()
                     .set_page_names(QString::from(outcome.page_names.as_str()));
                 self.as_mut().set_focus_row(focus);
+                self.as_mut().end_reset_model();
                 self.as_mut().bump_revision();
                 return;
             }
@@ -1356,8 +1358,6 @@ impl qobject::Journal {
             rust.can_undo = outcome.can_undo;
             rust.can_redo = outcome.can_redo;
         }
-        self.as_mut().end_reset_model();
-
         self.as_mut().set_error(QString::from(""));
         self.as_mut().set_ready(outcome.ready);
         self.as_mut().set_can_undo(outcome.can_undo);
@@ -1373,6 +1373,7 @@ impl qobject::Journal {
         self.as_mut()
             .set_page_names(QString::from(outcome.page_names.as_str()));
         self.as_mut().set_focus_row(focus);
+        self.as_mut().end_reset_model();
         self.as_mut().bump_revision();
     }
 

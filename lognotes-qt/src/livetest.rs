@@ -769,6 +769,16 @@ pub fn run() -> ! {
         result_rows > 2,
         format!("rows={result_rows}"),
     );
+    check(
+        "the results view hides the page star and menu button",
+        !driver::visible(&QString::from("favouriteStar"))
+            && !driver::visible(&QString::from("pageMenuButton")),
+        format!(
+            "star={} menu={}",
+            driver::visible(&QString::from("favouriteStar")),
+            driver::visible(&QString::from("pageMenuButton"))
+        ),
+    );
     driver::press_key(key::ESCAPE, modifier::NONE);
     driver::settle();
     check(
